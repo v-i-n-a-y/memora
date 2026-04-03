@@ -116,6 +116,71 @@ def compute_embedding(
         return _compute_embedding_tfidf(text)
 
 
+def compute_embeddings_batch(
+    entries: List[Dict[str, Any]],
+    embedding_model: str = "tfidf",
+) -> List[Dict[str, float]]:
+    """Compute embeddings for multiple entries in a single batch API call.
+
+    Each entry must have: content (str), metadata (Optional[Dict]), tags (List[str]).
+    Uses the same text assembly path as compute_embedding() for identical payloads.
+    Falls back to per-item sequential on error to preserve TF-IDF fallback semantics.
+    """
+    if not entries:
+        return []
+
+    # Assemble texts using the same path as compute_embedding()
+    texts = [
+        _get_embedding_text(e["content"], e.get("metadata"), e.get("tags", []))
+        for e in entries
+    ]
+
+    if embedding_model == "openai":
+        return _compute_embeddings_openai_batch(texts)
+    else:
+        # For non-OpenAI backends, fall back to sequential
+        return [compute_embedding(e["content"], e.get("metadata"), e.get("tags", []), embedding_model) for e in entries]
+
+
+def _compute_embeddings_openai_batch(texts: List[str]) -> List[Dict[str, float]]:
+    """Batch OpenAI embedding computation with chunking and error fallback."""
+    try:
+        import openai
+
+        api_key = os.getenv("OPENAI_API_KEY")
+        if not api_key:
+            return [_compute_embedding_tfidf(t) for t in texts]
+
+        if "openai_client" not in _embedding_model_cache:
+            _embedding_model_cache["openai_client"] = openai.OpenAI(api_key=api_key)
+
+        client = _embedding_model_cache["openai_client"]
+        model_name = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
+
+        max_chunk = 2048  # OpenAI batch limit
+        all_results: List[Dict[str, float]] = []
+
+        for i in range(0, len(texts), max_chunk):
+            chunk = texts[i : i + max_chunk]
+            try:
+                response = client.embeddings.create(input=chunk, model=model_name)
+                # Sort by index to preserve order
+                sorted_data = sorted(response.data, key=lambda d: d.index)
+                for emb in sorted_data:
+                    all_results.append({str(j): float(v) for j, v in enumerate(emb.embedding)})
+            except Exception:
+                # Chunk failed — fall back to per-item sequential (preserves TF-IDF fallback)
+                for text in chunk:
+                    all_results.append(_compute_embedding_openai(text))
+
+        return all_results
+
+    except ImportError:
+        return [_compute_embedding_tfidf(t) for t in texts]
+    except Exception:
+        return [_compute_embedding_tfidf(t) for t in texts]
+
+
 # --- Serialization ---
 
 def embedding_to_json(vector: Dict[str, float]) -> Optional[str]:

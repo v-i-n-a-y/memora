@@ -35,6 +35,8 @@ from .storage import (
     find_invalid_tag_entries,
     generate_insights,
     get_crossrefs,
+    get_hierarchy_paths,
+    get_memories_metadata_batch,
     get_memory,
     get_statistics,
     hybrid_search,
@@ -224,6 +226,16 @@ def _delete_memory(conn, memory_id: int):
 
 
 @_with_connection
+def _get_hierarchy_paths(conn):
+    return get_hierarchy_paths(conn)
+
+
+@_with_connection
+def _get_memories_metadata_batch(conn, memory_ids: List[int]):
+    return get_memories_metadata_batch(conn, memory_ids)
+
+
+@_with_connection
 def _list_memories(
     conn,
     query: Optional[str],
@@ -387,9 +399,7 @@ async def memory_create(
     # Check hierarchy path BEFORE creating to detect new paths
     new_path = extract_hierarchy_path(metadata)
     existing_paths = (
-        get_existing_hierarchy_paths(
-            _list_memories(None, None, None, 0, None, None, None, None, None)
-        )
+        _get_hierarchy_paths()
         if new_path
         else []
     )
@@ -463,9 +473,11 @@ async def memory_create(
         # Suggest hierarchy placement based on related memories (cross-refs)
         # (only if user didn't provide a hierarchy path)
         if not new_path and related_memories:
+            related_ids = [m["id"] for m in related_memories if m.get("id") is not None]
+            metadata_batch = _get_memories_metadata_batch(related_ids) if related_ids else {}
             hierarchy_suggestions = suggest_hierarchy_from_similar(
                 related_memories,
-                get_memory_by_id=_get_memory,
+                metadata_by_id=metadata_batch,
             )
             if hierarchy_suggestions:
                 top = hierarchy_suggestions[0]

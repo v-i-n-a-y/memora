@@ -28,6 +28,9 @@ from .embeddings import (
     cosine_similarity as _cosine_similarity,
 )
 from .embeddings import (
+    compute_embeddings_batch as _compute_embeddings_batch,
+)
+from .embeddings import (
     delete_embedding as _delete_embedding,
 )
 from .embeddings import (
@@ -1230,6 +1233,45 @@ def _search_by_vector(
     return results
 
 
+def _search_by_vector_ids_only(
+    conn: sqlite3.Connection,
+    vector_query: Dict[str, float],
+    *,
+    top_k: int = 5,
+    min_score: Optional[float] = None,
+    exclude_ids: Optional[Iterable[int]] = None,
+) -> List[Dict[str, Any]]:
+    """Lightweight vector search returning only {id, score} — no full memory dicts.
+
+    Preserves lazy embedding backfill for legacy/imported memories.
+    """
+    exclude_set = set(exclude_ids or [])
+
+    rows = conn.execute(
+        "SELECT id, content, metadata, tags FROM memories"
+    ).fetchall()
+    filtered = [(r["id"], r["content"], r["metadata"], r["tags"]) for r in rows if r["id"] not in exclude_set]
+
+    ids = [mid for mid, _, _, _ in filtered]
+    embeddings = _get_embeddings_for_ids(conn, ids)
+
+    results: List[Dict[str, Any]] = []
+    for memory_id, content, metadata_json, tags_json in filtered:
+        vector = embeddings.get(memory_id)
+        if vector is None:
+            meta = json.loads(metadata_json) if metadata_json else None
+            tags = json.loads(tags_json) if tags_json else []
+            vector = _compute_embedding(content, meta, tags)
+            _upsert_embedding(conn, memory_id, vector)
+        score = _cosine_similarity(vector_query, vector)
+        if min_score is not None and score < min_score:
+            continue
+        results.append({"id": memory_id, "score": score})
+
+    results.sort(key=lambda entry: entry["score"], reverse=True)
+    return results[:top_k]
+
+
 def _store_crossrefs(
     conn: sqlite3.Connection,
     memory_id: int,
@@ -1287,17 +1329,16 @@ def _update_crossrefs_for_memory(
             )
             _upsert_embedding(conn, memory_id, vector)
 
-    results = _search_by_vector(
+    results = _search_by_vector_ids_only(
         conn,
         vector,
-        metadata_filters=None,
         top_k=top_k,
         min_score=min_score,
         exclude_ids=[memory_id],
     )
 
     related = [
-        {"id": item["memory"]["id"], "score": item["score"], "edge_type": "related_to"}
+        {"id": item["id"], "score": item["score"], "edge_type": "related_to"}
         for item in results
     ]
     _store_crossrefs(conn, memory_id, related)
@@ -1668,9 +1709,10 @@ def _update_crossrefs(conn: sqlite3.Connection, memory_id: int) -> None:
     metadata = record.get("metadata") if record else None
     if metadata and metadata.get("type") == "section":
         return
-    related = _update_crossrefs_for_memory(conn, memory_id)
-    for item in related:
-        _update_crossrefs_for_memory(conn, item["id"])
+    _update_crossrefs_for_memory(conn, memory_id)
+    # Cascade (updating related memories' crossrefs) intentionally skipped.
+    # Related memories' crossrefs become eventually consistent via
+    # memory_rebuild_crossrefs or memory_related(refresh=True).
 
 
 def rebuild_crossrefs(conn: sqlite3.Connection) -> int:
@@ -1766,11 +1808,32 @@ def add_memory(
     _fts_upsert(conn, memory_id, content, metadata_json, tags_json)
     vector = _compute_embedding(content, prepared_metadata, validated_tags)
     _upsert_embedding(conn, memory_id, vector)
-    _update_crossrefs(conn, memory_id)
+
+    # Compute cross-refs (skip for section memories, pass pre-computed vector)
+    related: List[Dict[str, Any]] = []
+    is_section = prepared_metadata and prepared_metadata.get("type") == "section"
+    if not is_section:
+        related = _update_crossrefs_for_memory(conn, memory_id, vector=vector)
+
     _log_action(conn, memory_id, "create", f"Created memory #{memory_id}")
     conn.commit()
     _emit_event(conn, memory_id, validated_tags)
-    return get_memory(conn, memory_id)
+
+    # Construct result locally (avoids re-fetch and D1 read replica lag)
+    result: Dict[str, Any] = {
+        "id": memory_id,
+        "content": content,
+        "metadata": _present_metadata(prepared_metadata) if prepared_metadata else None,
+        "tags": validated_tags,
+        "created_at": now,
+        "updated_at": None,
+        "importance": 1.0,
+        "access_count": 0,
+        "last_accessed": None,
+        "importance_score": calculate_importance(now, 1.0, 0),
+        "related": related,
+    }
+    return result
 
 
 def add_memories(
@@ -1778,7 +1841,6 @@ def add_memories(
     entries: Iterable[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
-    embeddings: List[Dict[str, float]] = []
     prepared: List[tuple[str, Optional[str], Optional[str]]] = []
 
     for entry in entries:
@@ -1801,25 +1863,51 @@ def add_memories(
             "metadata_json": metadata_json,
             "tags_json": tags_json,
             "validated_tags": validated_tags,
+            "prepared_metadata": prepared_metadata,
+            "now": now,
         })
-        embeddings.append(_compute_embedding(content, prepared_metadata, validated_tags))
 
     if not prepared:
         return []
 
-    conn.executemany(
-        "INSERT INTO memories (content, metadata, tags, created_at) VALUES (?, ?, ?, ?)",
-        prepared,
+    # Batch compute embeddings (single API call for OpenAI instead of N calls)
+    embeddings = _compute_embeddings_batch(
+        [{"content": r["content"], "metadata": r["prepared_metadata"], "tags": r["validated_tags"]} for r in rows],
+        EMBEDDING_MODEL,
     )
 
-    # SQLite returns the cursor of the last execute; capture inserted IDs manually
-    start_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
-    inserted: List[int] = list(range(start_id - len(prepared) + 1, start_id + 1))
+    if isinstance(conn, D1Connection):
+        # D1 executemany executes separate HTTP inserts — IDs may not be contiguous.
+        # Insert individually and collect actual IDs from cursor.lastrowid.
+        inserted: List[int] = []
+        for params in prepared:
+            cur = conn.execute(
+                "INSERT INTO memories (content, metadata, tags, created_at) VALUES (?, ?, ?, ?)",
+                params,
+            )
+            inserted.append(cur.lastrowid)
+    else:
+        # Local SQLite: executemany + contiguous range (safe under single-writer WAL)
+        conn.executemany(
+            "INSERT INTO memories (content, metadata, tags, created_at) VALUES (?, ?, ?, ?)",
+            prepared,
+        )
+        start_id = conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+        inserted = list(range(start_id - len(prepared) + 1, start_id + 1))
 
+    # Upsert FTS and embeddings for all memories first
     for memory_id, entry, vector in zip(inserted, rows, embeddings):
         _fts_upsert(conn, memory_id, entry["content"], entry["metadata_json"], entry["tags_json"])
         _upsert_embedding(conn, memory_id, vector)
-        _update_crossrefs(conn, memory_id)
+
+    # Compute cross-refs after all embeddings are stored (skip section memories)
+    all_related: List[List[Dict[str, Any]]] = []
+    for memory_id, entry, vector in zip(inserted, rows, embeddings):
+        is_section = entry["prepared_metadata"] and entry["prepared_metadata"].get("type") == "section"
+        if is_section:
+            all_related.append([])
+        else:
+            all_related.append(_update_crossrefs_for_memory(conn, memory_id, vector=vector))
 
     for memory_id in inserted:
         _log_action(conn, memory_id, "create", f"Created memory #{memory_id}")
@@ -1830,7 +1918,67 @@ def add_memories(
     for memory_id, entry in zip(inserted, rows):
         _emit_event(conn, memory_id, entry["validated_tags"])
 
-    return [get_memory(conn, memory_id) for memory_id in inserted]
+    # Construct results locally (avoids re-fetch and D1 read replica lag)
+    results: List[Dict[str, Any]] = []
+    for memory_id, entry, related in zip(inserted, rows, all_related):
+        meta = entry["prepared_metadata"]
+        results.append({
+            "id": memory_id,
+            "content": entry["content"],
+            "metadata": _present_metadata(meta) if meta else None,
+            "tags": entry["validated_tags"],
+            "created_at": entry["now"],
+            "updated_at": None,
+            "importance": 1.0,
+            "access_count": 0,
+            "last_accessed": None,
+            "importance_score": calculate_importance(entry["now"], 1.0, 0),
+            "related": related,
+        })
+    return results
+
+
+def get_memories_metadata_batch(
+    conn: sqlite3.Connection,
+    memory_ids: List[int],
+) -> Dict[int, Optional[Dict[str, Any]]]:
+    """Fetch metadata for multiple memory IDs in one query."""
+    if not memory_ids:
+        return {}
+    placeholders = ",".join("?" for _ in memory_ids)
+    rows = conn.execute(
+        f"SELECT id, metadata FROM memories WHERE id IN ({placeholders})",
+        memory_ids,
+    ).fetchall()
+    result: Dict[int, Optional[Dict[str, Any]]] = {}
+    for row in rows:
+        meta = json.loads(row["metadata"]) if row["metadata"] else None
+        result[row["id"]] = _present_metadata(meta) if meta else None
+    return result
+
+
+def get_hierarchy_paths(conn: sqlite3.Connection) -> List[List[str]]:
+    """Return unique hierarchy paths (including parent prefixes) from all memories."""
+    from .hierarchy import extract_hierarchy_path
+
+    rows = conn.execute(
+        "SELECT metadata FROM memories WHERE metadata IS NOT NULL"
+    ).fetchall()
+    paths_set: set[tuple[str, ...]] = set()
+    for row in rows:
+        try:
+            meta = json.loads(row["metadata"]) if row["metadata"] else None
+        except (json.JSONDecodeError, TypeError):
+            continue
+        # Canonicalize legacy metadata formats before extracting hierarchy path
+        meta = _present_metadata(meta) if meta else None
+        path = extract_hierarchy_path(meta)
+        if not path:
+            continue
+        # Add all parent prefixes (matching get_existing_hierarchy_paths behavior)
+        for i in range(1, len(path) + 1):
+            paths_set.add(tuple(path[:i]))
+    return sorted([list(p) for p in paths_set], key=lambda p: (len(p), p))
 
 
 def get_memory(

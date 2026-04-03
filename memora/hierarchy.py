@@ -58,10 +58,14 @@ def extract_hierarchy_path(metadata: Optional[Any]) -> List[str]:
 
 def suggest_hierarchy_from_similar(
     similar_memories: List[Dict[str, Any]],
-    get_memory_by_id: Callable[[int], Optional[Dict[str, Any]]],
+    get_memory_by_id: Optional[Callable[[int], Optional[Dict[str, Any]]]] = None,
     max_suggestions: int = 3,
+    metadata_by_id: Optional[Dict[int, Optional[Dict[str, Any]]]] = None,
 ) -> List[Dict[str, Any]]:
-    """Suggest hierarchy placement from similar memories."""
+    """Suggest hierarchy placement from similar memories.
+
+    Either pass metadata_by_id (batch pre-fetched) or get_memory_by_id (per-item callback).
+    """
     path_scores: Dict[tuple[str, ...], float] = {}
     path_examples: Dict[tuple[str, ...], List[int]] = {}
 
@@ -74,11 +78,16 @@ def suggest_hierarchy_from_similar(
             continue
         score = item.get("score", 0)
 
-        full_memory = get_memory_by_id(memory_id)
-        if not full_memory:
+        # Use pre-fetched metadata if available, otherwise fall back to callback
+        if metadata_by_id is not None:
+            metadata = metadata_by_id.get(memory_id)
+        elif get_memory_by_id is not None:
+            full_memory = get_memory_by_id(memory_id)
+            metadata = full_memory.get("metadata") if full_memory else None
+        else:
             continue
 
-        path = extract_hierarchy_path(full_memory.get("metadata"))
+        path = extract_hierarchy_path(metadata)
         if not path:
             continue
 

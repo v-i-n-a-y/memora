@@ -21,3 +21,6 @@ data/
 dist/
 .wrangler/
 *.lock
+
+# Deep-work scratch
+plans/

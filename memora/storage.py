@@ -12,7 +12,7 @@ import sqlite3
 from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
 from typing import Sequence as TypingSequence
 
 from PIL import Image
@@ -35,6 +35,9 @@ from .embeddings import (
 )
 from .embeddings import (
     get_embeddings_for_ids as _get_embeddings_for_ids,
+)
+from .embeddings import (
+    json_to_embedding as _json_to_embedding,
 )
 from .embeddings import (
     rebuild_all_embeddings as _rebuild_all_embeddings,
@@ -1194,6 +1197,75 @@ def find_duplicate_candidates(
 # Embedding utility aliases (delegated to embeddings module)
 
 
+# Page size for the paginated JOIN used by the vector search helpers. One call
+# at 1000 rows × ~6 KB embeddings is ~6 MB — fits in a D1 HTTP response in
+# practice. Tunable via env var for pathological deployments; bad values fall
+# back to the default rather than raising at import time.
+def _resolve_vector_scan_page_size() -> int:
+    raw = os.getenv("MEMORA_VECTOR_SCAN_PAGE_SIZE")
+    if raw is None:
+        return 1000
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return 1000
+    if value < 1:
+        return 1000
+    # Hard ceiling to keep a single page from blowing past D1 response limits.
+    return min(value, 10_000)
+
+
+_VECTOR_SCAN_PAGE_SIZE = _resolve_vector_scan_page_size()
+
+
+def _iter_memories_with_embeddings(
+    conn: sqlite3.Connection,
+    *,
+    page_size: int = _VECTOR_SCAN_PAGE_SIZE,
+) -> Iterator[Tuple[sqlite3.Row, Optional[Dict[str, float]]]]:
+    """Yield ``(row, embedding_vector_or_None)`` for every memory, in id order.
+
+    Replaces the ``list_memories(...) + _get_embeddings_for_ids(...)`` two-step
+    that cost ~10 D1 round-trips. One JOIN, paginated by primary key so page
+    boundaries are stable under concurrent writes. Callers that need lazy
+    backfill should check for a ``None`` vector and call ``_compute_embedding``
+    themselves.
+    """
+    last_id = 0
+    while True:
+        rows = conn.execute(
+            """
+            SELECT m.id, m.content, m.metadata, m.tags,
+                   m.created_at, m.updated_at,
+                   m.importance, m.last_accessed, m.access_count,
+                   e.embedding AS embedding
+            FROM memories m
+            LEFT JOIN memories_embeddings e ON e.memory_id = m.id
+            WHERE m.id > ?
+            ORDER BY m.id
+            LIMIT ?
+            """,
+            (last_id, page_size),
+        ).fetchall()
+        if not rows:
+            return
+        for row in rows:
+            vector: Optional[Dict[str, float]] = None
+            # sqlite3.Row supports `in row.keys()`; the D1Cursor row proxy
+            # matches the same API. Treat an absent or NULL column as "no
+            # embedding" and let the caller decide whether to backfill.
+            try:
+                raw_embedding = row["embedding"]
+            except (IndexError, KeyError):
+                raw_embedding = None
+            if raw_embedding:
+                vector = _json_to_embedding(raw_embedding)
+            yield row, vector
+            last_id = row["id"]
+        if len(rows) < page_size:
+            return
+
+
 def _search_by_vector(
     conn: sqlite3.Connection,
     vector_query: Dict[str, float],
@@ -1204,17 +1276,22 @@ def _search_by_vector(
     exclude_ids: Optional[Iterable[int]] = None,
 ) -> List[Dict[str, Any]]:
     exclude_set = set(exclude_ids or [])
-
-    candidates = list_memories(conn, query=None, metadata_filters=metadata_filters)
-    filtered = [record for record in candidates if record["id"] not in exclude_set]
-
-    ids = [record["id"] for record in filtered]
-    embeddings = _get_embeddings_for_ids(conn, ids)
+    validated_filters = _validate_metadata_filters(metadata_filters) if metadata_filters else None
 
     results: List[Dict[str, Any]] = []
-    for record in filtered:
-        memory_id = record["id"]
-        vector = embeddings.get(memory_id)
+    for row, vector in _iter_memories_with_embeddings(conn):
+        memory_id = row["id"]
+        if memory_id in exclude_set:
+            continue
+
+        record = _serialise_row(row)
+
+        # Apply metadata filters in Python, matching list_memories() semantics.
+        if validated_filters and not _metadata_matches_filters(
+            record.get("metadata"), validated_filters
+        ):
+            continue
+
         if vector is None:
             vector = _compute_embedding(
                 record["content"],
@@ -1222,14 +1299,26 @@ def _search_by_vector(
                 record.get("tags", []),
             )
             _upsert_embedding(conn, memory_id, vector)
+
         score = _cosine_similarity(vector_query, vector)
         if min_score is not None and score < min_score:
             continue
         results.append({"score": score, "memory": record})
 
-    results.sort(key=lambda entry: entry["score"], reverse=True)
+    # Global sort across all pages — never truncate inside the loop, or we
+    # discard globally better matches that happen to be on a later page.
+    # Secondary key preserves pre-Phase-1 tie-break: equal scores come back
+    # newest-first (the old code got this by scanning list_memories() in
+    # created_at DESC order followed by a stable sort on score).
+    results.sort(
+        key=lambda entry: (
+            entry["score"],
+            entry["memory"].get("created_at") or "",
+        ),
+        reverse=True,
+    )
     if top_k is not None:
-        results = results[: top_k]
+        results = results[:top_k]
     return results
 
 
@@ -1241,35 +1330,48 @@ def _search_by_vector_ids_only(
     min_score: Optional[float] = None,
     exclude_ids: Optional[Iterable[int]] = None,
 ) -> List[Dict[str, Any]]:
-    """Lightweight vector search returning only {id, score} — no full memory dicts.
+    """Lightweight vector search returning only ``{id, score}`` — no full memory dicts.
 
-    Preserves lazy embedding backfill for legacy/imported memories.
+    Preserves lazy embedding backfill for legacy/imported memories. Uses the
+    paginated JOIN helper so a single create-time crossref scan is one D1
+    round-trip instead of ~10.
     """
     exclude_set = set(exclude_ids or [])
 
-    rows = conn.execute(
-        "SELECT id, content, metadata, tags FROM memories"
-    ).fetchall()
-    filtered = [(r["id"], r["content"], r["metadata"], r["tags"]) for r in rows if r["id"] not in exclude_set]
-
-    ids = [mid for mid, _, _, _ in filtered]
-    embeddings = _get_embeddings_for_ids(conn, ids)
-
     results: List[Dict[str, Any]] = []
-    for memory_id, content, metadata_json, tags_json in filtered:
-        vector = embeddings.get(memory_id)
+    for row, vector in _iter_memories_with_embeddings(conn):
+        memory_id = row["id"]
+        if memory_id in exclude_set:
+            continue
+
         if vector is None:
+            metadata_json = row["metadata"]
+            tags_json = row["tags"]
             meta = json.loads(metadata_json) if metadata_json else None
             tags = json.loads(tags_json) if tags_json else []
-            vector = _compute_embedding(content, meta, tags)
+            vector = _compute_embedding(row["content"], meta, tags)
             _upsert_embedding(conn, memory_id, vector)
+
         score = _cosine_similarity(vector_query, vector)
         if min_score is not None and score < min_score:
             continue
-        results.append({"id": memory_id, "score": score})
+        try:
+            created_at = row["created_at"] or ""
+        except (IndexError, KeyError):
+            created_at = ""
+        results.append({"id": memory_id, "score": score, "_created_at": created_at})
 
-    results.sort(key=lambda entry: entry["score"], reverse=True)
-    return results[:top_k]
+    # Global top-K across all pages — see note in _search_by_vector. Secondary
+    # sort on created_at keeps ties newest-first, matching the pre-Phase-1
+    # ordering.
+    results.sort(
+        key=lambda entry: (entry["score"], entry["_created_at"]),
+        reverse=True,
+    )
+    return [
+        {"id": entry["id"], "score": entry["score"]}
+        for entry in results[:top_k]
+    ]
 
 
 def _store_crossrefs(

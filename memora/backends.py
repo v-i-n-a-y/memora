@@ -842,11 +842,26 @@ class D1Cursor:
 
 
 class D1Connection:
-    """A connection-like object that talks to Cloudflare D1 via HTTP API."""
+    """A connection-like object that talks to Cloudflare D1 via HTTP API.
 
-    # Class-level session token for read-your-writes consistency across connections
-    _session_token: str = None
-    _session_lock = threading.Lock()
+    Session tokens (D1 read-your-writes bookmarks) are stored **per connection
+    instance** and also mirrored onto the owning :class:`D1Backend` so that the
+    next connection opened by that backend inherits the latest known bookmark.
+    This gives two useful properties:
+
+    1. **No cross-instance stomping.** A background thread (``cloud_sync``'s
+       ``threading.Timer``) or an unrelated concurrent tool call no longer
+       clobbers this connection's token mid-request — the field lives on the
+       instance, not in class or thread-local state.
+    2. **Bookmark continuity across tool calls.** When a tool call finishes and
+       its connection is closed, the last observed bookmark is parked on the
+       backend singleton. The next tool call opens a fresh connection and is
+       seeded with that bookmark, preserving read-your-writes across calls.
+
+    Concurrent writers race on the backend-level bookmark update; D1 bookmarks
+    are monotonically advancing so last-writer-wins yields a valid continuation
+    point.
+    """
 
     def __init__(self, account_id: str, database_id: str, api_token: str):
         self.account_id = account_id
@@ -855,6 +870,11 @@ class D1Connection:
         self.base_url = f"https://api.cloudflare.com/client/v4/accounts/{account_id}/d1/database/{database_id}"
         self.row_factory = None
         self._pending_statements = []
+        self._session_token: Optional[str] = None
+        # Set by D1Backend.connect() so _execute_api can push new bookmarks
+        # back up to the backend-level singleton. May be None for connections
+        # constructed directly without a backend (tests, ad-hoc tooling).
+        self._backend: Optional["D1Backend"] = None
 
     def _execute_api(self, sql: str, params: tuple = None) -> dict:
         """Execute SQL via D1 HTTP API with session affinity for read-your-writes."""
@@ -876,9 +896,9 @@ class D1Connection:
         }
 
         # Include session token for read-your-writes consistency
-        with D1Connection._session_lock:
-            if D1Connection._session_token:
-                headers["cf-d1-session-token"] = D1Connection._session_token
+        # (per-instance — see class docstring).
+        if self._session_token:
+            headers["cf-d1-session-token"] = self._session_token
 
         req = urllib.request.Request(
             url,
@@ -891,12 +911,17 @@ class D1Connection:
             with urllib.request.urlopen(req, timeout=30) as resp:
                 result = json.loads(resp.read().decode())
 
-                # Extract session token from response for future requests
-                # D1 returns this token after writes to enable read-your-writes
-                session_token = resp.headers.get("cf-d1-session-token")
-                if session_token:
-                    with D1Connection._session_lock:
-                        D1Connection._session_token = session_token
+                # Extract session token from response for subsequent requests.
+                # D1 returns the updated bookmark after writes so the next
+                # query on this connection can see its own writes. We also
+                # mirror it up to the owning D1Backend so the *next*
+                # connection (next tool call) inherits the latest bookmark
+                # and preserves read-your-writes across calls.
+                response_token = resp.headers.get("cf-d1-session-token")
+                if response_token:
+                    self._session_token = response_token
+                    if self._backend is not None:
+                        self._backend.update_bookmark(response_token)
 
         except urllib.error.HTTPError as e:
             error_body = e.read().decode() if e.fp else str(e)
@@ -989,6 +1014,13 @@ class D1Backend(StorageBackend):
     - Executes all queries directly against D1 (no local caching)
     - Uses R2 for media/image storage only
     - No sync needed - D1 is the source of truth
+
+    Holds a single "latest known" D1 session bookmark so that new connections
+    inherit the most recent read-your-writes point at open time and write back
+    the advanced bookmark on each successful HTTP call. Concurrent writers race
+    on the final assignment (last-writer-wins), which is fine because D1
+    bookmarks are monotonically advancing — any surviving bookmark is a valid
+    continuation point.
     """
 
     def __init__(self, account_id: str, database_id: str, api_token: str):
@@ -1002,12 +1034,34 @@ class D1Backend(StorageBackend):
         self.account_id = account_id
         self.database_id = database_id
         self.api_token = api_token
+        self._latest_bookmark: Optional[str] = None
+        self._bookmark_lock = threading.Lock()
 
         logger.info(f"Initialized D1Backend: database={database_id}")
 
+    def get_latest_bookmark(self) -> Optional[str]:
+        with self._bookmark_lock:
+            return self._latest_bookmark
+
+    def update_bookmark(self, bookmark: str) -> None:
+        """Advance the backend bookmark iff ``bookmark`` is newer.
+
+        D1 session bookmarks sort lexicographically oldest-to-newest (per
+        Cloudflare docs), so a slower request that started from an older
+        bookmark can finish after a faster one and must NOT clobber the
+        newer bookmark with its older response. We keep the lexicographic
+        max under the lock.
+        """
+        with self._bookmark_lock:
+            if self._latest_bookmark is None or bookmark > self._latest_bookmark:
+                self._latest_bookmark = bookmark
+
     def connect(self, *, check_same_thread: bool = True) -> D1Connection:
-        """Return a D1 connection."""
-        return D1Connection(self.account_id, self.database_id, self.api_token)
+        """Return a D1 connection seeded with the backend's latest bookmark."""
+        conn = D1Connection(self.account_id, self.database_id, self.api_token)
+        conn._session_token = self.get_latest_bookmark()
+        conn._backend = self
+        return conn
 
     def sync_before_use(self) -> None:
         """No-op - D1 is always up to date."""

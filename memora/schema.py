@@ -2,17 +2,63 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
+import weakref
 
 from .backends import D1Connection
+
+# Cache of backends whose schema has already been ensured in this process.
+# We stash a flag directly on each backend instance (so the cache entry dies
+# with the backend — no id() reuse hazard), with a WeakKeyDictionary fallback
+# for weakref-capable backends that reject direct attribute assignment. If a
+# backend supports neither (e.g. __slots__ without __weakref__), caching is
+# silently disabled for that instance — ensure_schema() just runs every call,
+# which is today's behavior, so this is a safe degradation.
+_schema_lock = threading.Lock()
+_schema_ensured_fallback: "weakref.WeakKeyDictionary[object, bool]" = weakref.WeakKeyDictionary()
+
+
+def _backend_schema_ensured(storage_backend) -> bool:
+    if getattr(storage_backend, "_schema_ensured", False):
+        return True
+    try:
+        return _schema_ensured_fallback.get(storage_backend, False)
+    except TypeError:
+        # Backend not weak-referenceable (e.g. __slots__ without __weakref__).
+        return False
+
+
+def _mark_backend_schema_ensured(storage_backend) -> None:
+    try:
+        storage_backend._schema_ensured = True
+        return
+    except (AttributeError, TypeError):
+        pass
+    try:
+        _schema_ensured_fallback[storage_backend] = True
+    except TypeError:
+        # Backend not weak-referenceable and not attribute-settable: caching
+        # is disabled for this instance. ensure_schema() will re-run, matching
+        # pre-cache behavior.
+        pass
 
 
 def connect(storage_backend, *, check_same_thread: bool = True) -> sqlite3.Connection:
     """Create a database connection using the given storage backend.
 
     For cloud backends, this will automatically sync from cloud before use.
+
+    ``ensure_schema()`` is run once per backend instance per process. On D1 HTTP
+    it issues 7–9 round-trips (~4–8 s); the per-call version was the single
+    biggest source of tool-call latency. Cache is tied to the backend instance
+    lifetime — a new backend triggers a fresh ensure_schema pass.
     """
     conn = storage_backend.connect(check_same_thread=check_same_thread)
-    ensure_schema(conn)
+    if not _backend_schema_ensured(storage_backend):
+        with _schema_lock:
+            if not _backend_schema_ensured(storage_backend):
+                ensure_schema(conn)
+                _mark_backend_schema_ensured(storage_backend)
     return conn
 
 

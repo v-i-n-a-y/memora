@@ -1006,7 +1006,16 @@ async def memory_rebuild_embeddings() -> Dict[str, Any]:
 
 @mcp.tool()
 async def memory_related(memory_id: int, refresh: bool = False) -> Dict[str, Any]:
-    """Return cross-referenced memories for a given entry."""
+    """Return cross-referenced memories for a given entry.
+
+    Consistency: the ``related`` graph is **eventually consistent**. When a
+    new memory A is created or updated with references to an existing B,
+    A.related is computed fresh but B.related is not re-cascaded — it stays
+    valid until either a full rebuild or an explicit refresh. Pass
+    ``refresh=True`` to recompute this memory's crossrefs on the fly (the
+    strong-consistency path). For a full rebuild across the store, call
+    ``memory_rebuild_crossrefs``.
+    """
 
     related = _get_related(memory_id, refresh)
     return {"id": memory_id, "related": related}
@@ -1014,7 +1023,11 @@ async def memory_related(memory_id: int, refresh: bool = False) -> Dict[str, Any
 
 @mcp.tool()
 async def memory_rebuild_crossrefs() -> Dict[str, Any]:
-    """Recompute cross-reference links for all memories. Rate limited: 300s cooldown."""
+    """Recompute cross-reference links for all memories. Rate limited: 300s cooldown.
+
+    Use this periodically (or after bulk imports) to close the eventual-consistency
+    gap in the ``related`` graph — see ``memory_related`` for the consistency model.
+    """
     if msg := _check_tool_cooldown("memory_rebuild_crossrefs"):
         return {"error": "rate_limited", "message": msg}
     try:

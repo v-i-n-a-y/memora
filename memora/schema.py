@@ -8,34 +8,71 @@ import weakref
 from .backends import D1Connection
 
 # Cache of backends whose schema has already been ensured in this process.
-# We stash a flag directly on each backend instance (so the cache entry dies
+# We stash a *signature* on each backend instance (so the cache entry dies
 # with the backend — no id() reuse hazard), with a WeakKeyDictionary fallback
 # for weakref-capable backends that reject direct attribute assignment. If a
 # backend supports neither (e.g. __slots__ without __weakref__), caching is
 # silently disabled for that instance — ensure_schema() just runs every call,
 # which is today's behavior, so this is a safe degradation.
+#
+# The signature for backends with a ``cache_path`` attribute (e.g.
+# ``CloudSQLiteBackend``) is the underlying file's ``(st_ino, st_dev)`` pair,
+# so when ``sync_before_use()`` replaces the file via ``shutil.move``/
+# ``os.rename`` the cache is invalidated automatically. Normal writes (commits)
+# keep the same inode, so steady-state tool calls still hit the cache.
+#
+# For backends without a ``cache_path`` (``D1Backend``, in-memory, bare
+# ``SQLiteBackend``), the signature is the sentinel ``True`` — identity-only,
+# matching pre-fix behavior.
 _schema_lock = threading.Lock()
-_schema_ensured_fallback: "weakref.WeakKeyDictionary[object, bool]" = weakref.WeakKeyDictionary()
+_schema_ensured_fallback: "weakref.WeakKeyDictionary[object, object]" = weakref.WeakKeyDictionary()
+
+
+def _backend_schema_signature(storage_backend):
+    """Return a value that changes when the underlying DB file is replaced.
+
+    ``None`` means "can't compute a stable signature right now" — the caller
+    should treat this as a cache miss and re-run ensure_schema (but not cache
+    the result, since the next call would miss again).
+    """
+    cache_path = getattr(storage_backend, "cache_path", None)
+    if cache_path is not None:
+        try:
+            st = cache_path.stat()
+        except (OSError, AttributeError):
+            return None
+        return (st.st_ino, st.st_dev)
+    return True
 
 
 def _backend_schema_ensured(storage_backend) -> bool:
-    if getattr(storage_backend, "_schema_ensured", False):
+    current_sig = _backend_schema_signature(storage_backend)
+    if current_sig is None:
+        return False
+    stored = getattr(storage_backend, "_schema_ensured", None)
+    if stored is not None and stored == current_sig:
         return True
     try:
-        return _schema_ensured_fallback.get(storage_backend, False)
+        fallback_sig = _schema_ensured_fallback.get(storage_backend)
     except TypeError:
         # Backend not weak-referenceable (e.g. __slots__ without __weakref__).
         return False
+    return fallback_sig is not None and fallback_sig == current_sig
 
 
 def _mark_backend_schema_ensured(storage_backend) -> None:
+    sig = _backend_schema_signature(storage_backend)
+    if sig is None:
+        # Can't compute a signature — don't cache. Next call will re-run
+        # ensure_schema, which is the safe fallback.
+        return
     try:
-        storage_backend._schema_ensured = True
+        storage_backend._schema_ensured = sig
         return
     except (AttributeError, TypeError):
         pass
     try:
-        _schema_ensured_fallback[storage_backend] = True
+        _schema_ensured_fallback[storage_backend] = sig
     except TypeError:
         # Backend not weak-referenceable and not attribute-settable: caching
         # is disabled for this instance. ensure_schema() will re-run, matching

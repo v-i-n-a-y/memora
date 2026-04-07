@@ -521,7 +521,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
 
   // Build cluster data using Louvain on crossrefs
   const nodeIds = nodes.map(n => n.id);
-  const clusterData = buildClusterData(crossrefsMap, nodeIds, 0.5, 3);
+  const clusterData = buildClusterData(crossrefsMap, nodeIds, 0.4, 3);
 
   return Response.json({
     nodes,

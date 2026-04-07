@@ -283,7 +283,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
   const url = new URL(request.url);
   const dbName = url.searchParams.get("db");
   const db = getDatabase(env, dbName);
-  const minScore = parseFloat(env.MIN_EDGE_SCORE || "0.40");
+  const minScore = parseFloat(env.MIN_EDGE_SCORE || "0.30");
 
   // Fetch all memories
   const memoriesResult = await db.prepare(
@@ -521,7 +521,7 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
 
   // Build cluster data using Louvain on crossrefs
   const nodeIds = nodes.map(n => n.id);
-  const clusterData = buildClusterData(crossrefsMap, nodeIds, 0.4, 3);
+  const clusterData = buildClusterData(crossrefsMap, nodeIds, 0.3, 3);
 
   return Response.json({
     nodes,

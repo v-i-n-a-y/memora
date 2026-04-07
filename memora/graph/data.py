@@ -351,7 +351,7 @@ CLUSTER_COLORS = [
 
 
 def _build_cluster_data(
-    conn, memories: List[Dict], min_score: float = 0.40
+    conn, memories: List[Dict], min_score: float = 0.30
 ) -> Dict[str, Any]:
     """Build cluster mappings using Louvain community detection.
 
@@ -481,7 +481,7 @@ def _build_sections_html(
     return sections_html
 
 
-def get_graph_data(min_score: float = 0.40, rebuild: bool = False) -> Dict[str, Any]:
+def get_graph_data(min_score: float = 0.30, rebuild: bool = False) -> Dict[str, Any]:
     """Get graph nodes, edges, and metadata for API response.
 
     Args:
@@ -568,7 +568,7 @@ def get_memory_for_api(memory_id: int) -> Dict[str, Any]:
 
 
 def export_graph_html(
-    output_path: Optional[str] = None, min_score: float = 0.40
+    output_path: Optional[str] = None, min_score: float = 0.30
 ) -> Dict[str, Any]:
     """Generate static HTML knowledge graph visualization.
 

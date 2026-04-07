@@ -38,22 +38,28 @@ memory_get(memory_id=170, follow="full_history")  # returns history: [#157, #170
 
 ### Saving knowledge — use `memory_absorb`
 
-**Prefer `memory_absorb` over `memory_create` when saving knowledge.** Absorb automatically checks for duplicates, supersedes outdated memories, and links related ones.
+**Prefer `memory_absorb` over `memory_create` when saving knowledge.** Absorb automatically checks for duplicates, supersedes outdated memories, links related ones, and consolidates related new facts into single richer memories.
+
+**Write detailed, context-rich facts — not tiny one-liners.** Each fact should be a full sentence or short paragraph with enough context to be useful on its own. Related facts passed together are automatically merged into a single consolidated memory via LLM synthesis.
 
 ```
 memory_absorb(
-    facts=["The auth rewrite is driven by legal compliance", "D1 backend now supports bookmarks"],
+    facts=[
+        "clmux v0.4.16.1 fixes hidden pane text leakage by restricting tmux allow-passthrough to only the visible TUI window instead of globally, preventing hidden reviewer and parking windows from leaking escape sequences",
+        "clmux sidebar now filters out _reviewers and parking windows from list-panes queries, and the ! notification indicator persists across workspace switches until the user responds"
+    ],
     source="manual",
-    tags=["memora/knowledge"]
+    tags=["clmux", "bugfix"]
 )
 ```
 
-Absorb handles dedup automatically:
+Absorb handles dedup and consolidation automatically:
 - **Duplicate** → skipped (no new memory created)
 - **Update** → creates new memory + supersedes the old one
 - **Contradiction** → creates new memory + links with contradicts edge
 - **Related** → creates new memory + links with related_to edge
 - **New** → creates new memory (no matches found)
+- **Consolidated** → related new facts merged into a single richer memory
 
 Use `dry_run=True` to preview what absorb would do without writing.
 

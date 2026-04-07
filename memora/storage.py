@@ -2427,6 +2427,12 @@ Respond with JSON array only (no markdown):
                 continue
             rel = cls.get("relationship", "").upper()
             mid = cls.get("memory_id")
+            # LLMs may return memory_id as string — coerce to int
+            if isinstance(mid, str):
+                try:
+                    mid = int(mid)
+                except (ValueError, TypeError):
+                    continue
             if rel in valid_rels and mid in valid_ids:
                 cls["relationship"] = rel
                 validated.append(cls)
@@ -2492,18 +2498,9 @@ def _group_facts_by_similarity(
     Returns:
         List of groups, each a list of indices into facts_with_vectors
     """
-    import math
-
     n = len(facts_with_vectors)
     if n <= 1:
         return [[i] for i in range(n)]
-
-    # Compute cosine similarity between all pairs
-    def cosine_sim(a, b):
-        dot = sum(x * y for x, y in zip(a, b))
-        na = math.sqrt(sum(x * x for x in a))
-        nb = math.sqrt(sum(x * x for x in b))
-        return dot / (na * nb) if na > 0 and nb > 0 else 0.0
 
     assigned = [False] * n
     groups: List[List[int]] = []
@@ -2519,7 +2516,7 @@ def _group_facts_by_similarity(
             if assigned[j]:
                 continue
             vec_j = facts_with_vectors[j][1]
-            if cosine_sim(vec_i, vec_j) >= threshold:
+            if _cosine_similarity(vec_i, vec_j) >= threshold:
                 group.append(j)
                 assigned[j] = True
 
@@ -2626,20 +2623,12 @@ def absorb_memory(
                 })
         classifications = _classify_fact_against_matches(fact, match_data) if match_data else []
 
-        # If LLM returned no classifications and we have matches, check why
+        # If LLM returned no classifications and we have matches, fall through
+        # to create rather than silently dropping knowledge.
         if not classifications and matches:
-            llm_client = _get_llm_client()
-            if not llm_client:
-                skip_reason = f"similar to #{top_mem['id']} (score: {top_score:.2f}); LLM not configured"
-            else:
-                skip_reason = f"similar to #{top_mem['id']} (score: {top_score:.2f}); LLM classify returned empty (model={LLM_MODEL})"
-            decisions.append({
-                "fact": fact[:80],
-                "action": "skipped",
-                "reason": skip_reason,
-                "match_id": top_mem["id"],
-            })
-            counts["skipped"] += 1
+            # Create with related_to link to preserve knowledge
+            pending_creates.append((fact, vector, ("related_to", top_mem["id"], "LLM classify empty; preserving as related")))
+            counts["linked"] += 1
             continue
 
         # Determine action based on LLM classification

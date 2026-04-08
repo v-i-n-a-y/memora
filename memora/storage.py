@@ -892,6 +892,23 @@ def _filter_suggested_tags(suggested: List[str]) -> List[str]:
     return filtered
 
 
+def _auto_assign_section(
+    metadata: Optional[Dict[str, Any]],
+    content: str,
+) -> Optional[Dict[str, Any]]:
+    """Auto-assign metadata.section based on detected project if not already set."""
+    project = _detect_project(content, metadata)
+    if not project:
+        return metadata
+
+    if metadata and metadata.get("section"):
+        return metadata  # already has a section
+
+    updated = dict(metadata) if metadata else {}
+    updated["section"] = project
+    return updated
+
+
 def _enforce_tag_whitelist(tags: List[str]) -> None:
     from . import TAG_WHITELIST
 
@@ -2543,6 +2560,7 @@ def add_memory(
 
     # Auto-detect memory type (issue/todo) from content if not explicitly set
     metadata, tags = _apply_auto_detection(content, metadata, tags)
+    metadata = _auto_assign_section(metadata, content)
 
     validated_tags = _validate_tags(tags)
     validated_tags = _normalize_tags(validated_tags, content, metadata)
@@ -2635,6 +2653,7 @@ def add_memories(
         tags = entry.get("tags") or []
         # Auto-detect memory type (issue/todo) from content if not explicitly set
         metadata, tags = _apply_auto_detection(content, metadata, tags)
+        metadata = _auto_assign_section(metadata, content)
         prepared_metadata = _prepare_metadata(metadata)
         validated_tags = _validate_tags(tags)
         validated_tags = _normalize_tags(validated_tags, content, metadata)
@@ -3209,13 +3228,20 @@ def backfill_tags(
         processed += 1
         new_tags = _normalize_tags(old_tags, content, metadata)
 
-        if sorted(new_tags) != sorted(old_tags):
+        # Auto-assign section if missing
+        new_metadata = _auto_assign_section(metadata, content)
+        section_changed = (new_metadata or {}).get("section") != (metadata or {}).get("section")
+
+        if sorted(new_tags) != sorted(old_tags) or section_changed:
             changed += 1
-            changes.append({
+            change_entry: Dict[str, Any] = {
                 "id": memory_id,
                 "old_tags": old_tags,
                 "new_tags": new_tags,
-            })
+            }
+            if section_changed:
+                change_entry["section_added"] = (new_metadata or {}).get("section")
+            changes.append(change_entry)
 
             if not dry_run:
                 new_tags_json = json.dumps(new_tags, ensure_ascii=False)
@@ -3223,6 +3249,12 @@ def backfill_tags(
                     "UPDATE memories SET tags = ? WHERE id = ?",
                     (new_tags_json, memory_id),
                 )
+                if section_changed and new_metadata:
+                    new_meta_json = json.dumps(new_metadata, ensure_ascii=False)
+                    conn.execute(
+                        "UPDATE memories SET metadata = ? WHERE id = ?",
+                        (new_meta_json, memory_id),
+                    )
                 # Update FTS index with new tags
                 _fts_upsert(conn, memory_id, content, metadata_json, new_tags_json)
 
@@ -4427,6 +4459,7 @@ def import_memories(
             created_at = entry.get("created_at")
 
             # Prepare data
+            metadata = _auto_assign_section(metadata, content)
             prepared_metadata = _prepare_metadata(metadata) if metadata else None
             validated_tags = _validate_tags(tags)
             validated_tags = _normalize_tags(validated_tags, content, metadata)

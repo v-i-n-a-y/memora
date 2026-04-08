@@ -812,6 +812,86 @@ def _validate_tags(tags: Optional[Iterable[str]]) -> List[str]:
     return validated
 
 
+# ---------------------------------------------------------------------------
+# Deterministic tag normalization — prefix generic tags with project name
+# ---------------------------------------------------------------------------
+
+_PROJECT_INDICATORS: Dict[str, List[str]] = {
+    "memora": [r"\bmemora\b", r"\bmemory.server\b", r"\bmcp.server\b", r"\bstorage\.py\b", r"\babsorb\b"],
+    "clmux": [r"\bclmux\b", r"\btmux.workspace\b", r"\bmultiplexer\b"],
+}
+
+_GENERIC_TAGS_TO_PREFIX = {
+    "plan", "analysis", "research", "architecture", "roadmap",
+    "design", "status", "reference",
+}
+
+# Valid project prefixes for LLM-suggested tag filtering
+_KNOWN_PROJECT_PREFIXES = tuple(f"{p}/" for p in _PROJECT_INDICATORS)
+
+
+def _detect_project(content: str, metadata: Optional[Dict[str, Any]] = None) -> Optional[str]:
+    """Detect which project content belongs to. Returns None if ambiguous or unknown."""
+    text = content.lower()
+    if metadata:
+        section = str(metadata.get("section", "")).lower()
+        text = f"{text} {section}"
+
+    matched = [
+        project
+        for project, patterns in _PROJECT_INDICATORS.items()
+        if any(re.search(p, text) for p in patterns)
+    ]
+
+    if len(matched) == 1:
+        return matched[0]
+    return None  # ambiguous (multiple) or unknown (none)
+
+
+def _normalize_tags(
+    tags: List[str],
+    content: str,
+    metadata: Optional[Dict[str, Any]] = None,
+) -> List[str]:
+    """Normalize generic tags to project-prefixed form when context is unambiguous.
+
+    Idempotent: tags already containing '/' are never touched.
+    Returns the normalized tag list.
+    """
+    if not tags:
+        return tags
+
+    project = _detect_project(content, metadata)
+    if not project:
+        return tags
+
+    normalized = []
+    seen: set = set()
+    for tag in tags:
+        if tag in _GENERIC_TAGS_TO_PREFIX and "/" not in tag:
+            prefixed = f"{project}/{tag}"
+            if prefixed not in seen:
+                normalized.append(prefixed)
+                seen.add(prefixed)
+        else:
+            if tag not in seen:
+                normalized.append(tag)
+                seen.add(tag)
+    return normalized
+
+
+def _filter_suggested_tags(suggested: List[str]) -> List[str]:
+    """Filter LLM-suggested tags to only known project prefixes + known suffixes."""
+    filtered = []
+    for tag in suggested:
+        if not isinstance(tag, str) or "/" not in tag:
+            continue
+        prefix, _, suffix = tag.partition("/")
+        if f"{prefix}/" in _KNOWN_PROJECT_PREFIXES and suffix in _GENERIC_TAGS_TO_PREFIX:
+            filtered.append(tag)
+    return filtered
+
+
 def _enforce_tag_whitelist(tags: List[str]) -> None:
     from . import TAG_WHITELIST
 
@@ -2465,6 +2545,7 @@ def add_memory(
     metadata, tags = _apply_auto_detection(content, metadata, tags)
 
     validated_tags = _validate_tags(tags)
+    validated_tags = _normalize_tags(validated_tags, content, metadata)
     _enforce_tag_whitelist(validated_tags)
     tags_json = json.dumps(validated_tags, ensure_ascii=False)
 
@@ -2556,6 +2637,7 @@ def add_memories(
         metadata, tags = _apply_auto_detection(content, metadata, tags)
         prepared_metadata = _prepare_metadata(metadata)
         validated_tags = _validate_tags(tags)
+        validated_tags = _normalize_tags(validated_tags, content, metadata)
         _enforce_tag_whitelist(validated_tags)
         metadata_json = json.dumps(prepared_metadata, ensure_ascii=False) if prepared_metadata else None
         tags_json = json.dumps(validated_tags, ensure_ascii=False)
@@ -2656,18 +2738,19 @@ _ABSORB_RELATED_THRESHOLD = 0.35    # Send to LLM for classification
 def _classify_fact_against_matches(
     fact: str,
     matches: List[Dict[str, Any]],
-) -> List[Dict[str, Any]]:
+) -> Tuple[List[Dict[str, Any]], List[str]]:
     """Use LLM to classify how a fact relates to existing memories.
 
-    Returns list of {memory_id, relationship, reason} dicts.
-    Relationship is one of: DUPLICATE, UPDATE, CONTRADICT, RELATED, UNRELATED.
+    Returns (classifications, suggested_tags) where:
+    - classifications: list of {memory_id, relationship, reason} dicts
+    - suggested_tags: list of project-prefixed tag strings
     """
     client = _get_llm_client()
     if not client:
-        return []
+        return [], []
 
     match_descriptions = "\n".join(
-        f'  {i+1}. [#{m["id"]}] "{m["content"][:300]}" (similarity: {m.get("score", 0):.2f})'
+        f'  {i+1}. [#{m["id"]}] "{m["content"][:300]}" (similarity: {m.get("score", 0):.2f}, tags: {m.get("tags", [])})'
         for i, m in enumerate(matches)
     )
 
@@ -2687,18 +2770,21 @@ For each memory, classify the relationship:
 - RELATED: different aspect of same topic
 - UNRELATED: false positive similarity match
 
-Respond with JSON array only (no markdown):
-[{{"memory_id": <id>, "relationship": "<type>", "reason": "<brief reason>"}}]"""
+Also suggest 1-3 project-prefixed tags for the new fact (e.g. "memora/research", "clmux/architecture").
+Use tags from the matched memories as guidance. Avoid generic single-word tags.
+
+Respond with JSON only (no markdown):
+{{"classifications": [{{"memory_id": <id>, "relationship": "<type>", "reason": "<brief reason>"}}], "suggested_tags": ["tag1", "tag2"]}}"""
 
     try:
         response = client.chat.completions.create(
             model=LLM_MODEL,
             messages=[
-                {"role": "system", "content": "You classify relationships between text entries. Always respond with valid JSON array only."},
+                {"role": "system", "content": "You classify relationships between text entries and suggest tags. Always respond with valid JSON only."},
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=600,
         )
         result_text = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
@@ -2707,14 +2793,29 @@ Respond with JSON array only (no markdown):
             if result_text.endswith("```"):
                 result_text = result_text[:-3]
             result_text = result_text.strip()
-        classifications = json.loads(result_text)
-        if not isinstance(classifications, list):
-            return []
+        parsed = json.loads(result_text)
+
+        # Handle both old format (bare array) and new format (object)
+        suggested_tags: List[str] = []
+        if isinstance(parsed, list):
+            classifications_raw = parsed
+        elif isinstance(parsed, dict):
+            classifications_raw = parsed.get("classifications", [])
+            raw_tags = parsed.get("suggested_tags", [])
+            suggested_tags = _filter_suggested_tags(
+                [t for t in raw_tags if isinstance(t, str)]
+            )
+        else:
+            return [], []
+
+        if not isinstance(classifications_raw, list):
+            return [], suggested_tags
+
         # Validate: only keep entries with known relationship and valid candidate IDs
         valid_ids = {m["id"] for m in matches}
         valid_rels = {"DUPLICATE", "UPDATE", "CONTRADICT", "RELATED", "UNRELATED"}
         validated = []
-        for cls in classifications:
+        for cls in classifications_raw:
             if not isinstance(cls, dict):
                 continue
             rel = cls.get("relationship", "").upper()
@@ -2727,11 +2828,12 @@ Respond with JSON array only (no markdown):
                     continue
             if rel in valid_rels and mid in valid_ids:
                 cls["relationship"] = rel
+                cls["memory_id"] = mid  # ensure int after coercion
                 validated.append(cls)
-        return validated
+        return validated, suggested_tags
     except Exception as e:
         logger.warning("Absorb LLM classification failed: %s", e, exc_info=True)
-        return []
+        return [], []
 
 
 _ABSORB_CONSOLIDATION_THRESHOLD = 0.55  # Similarity for grouping new facts together
@@ -2854,7 +2956,7 @@ def absorb_memory(
     counts = {"created": 0, "superseded": 0, "skipped": 0, "linked": 0, "contradicted": 0, "consolidated": 0}
 
     # Phase 1: Classify each fact against existing memories, collect "to create" facts
-    pending_creates: List[tuple] = []  # (fact, vector, link_info_or_None)
+    pending_creates: List[tuple] = []  # (fact, vector, link_info_or_None, suggested_tags)
 
     for fact in facts:
         fact = fact.strip()
@@ -2885,7 +2987,7 @@ def absorb_memory(
 
         # No similar memories — queue for creation
         if not matches:
-            pending_creates.append((fact, vector, None))
+            pending_creates.append((fact, vector, None, []))
             continue
 
         # Check for high-similarity duplicate first (skip LLM if obvious)
@@ -2912,14 +3014,15 @@ def absorb_memory(
                     "id": mem["id"],
                     "content": mem.get("content", ""),
                     "score": m.get("score", 0),
+                    "tags": mem.get("tags", []),
                 })
-        classifications = _classify_fact_against_matches(fact, match_data) if match_data else []
+        classifications, suggested_tags = _classify_fact_against_matches(fact, match_data) if match_data else ([], [])
 
         # If LLM returned no classifications and we have matches, fall through
         # to create rather than silently dropping knowledge.
         if not classifications and matches:
             # Create with related_to link to preserve knowledge
-            pending_creates.append((fact, vector, ("related_to", top_mem["id"], "LLM classify empty; preserving as related")))
+            pending_creates.append((fact, vector, ("related_to", top_mem["id"], "LLM classify empty; preserving as related"), suggested_tags))
             counts["linked"] += 1
             continue
 
@@ -2943,27 +3046,27 @@ def absorb_memory(
 
             elif rel == "UPDATE":
                 # Queue for creation with supersedes link
-                pending_creates.append((fact, vector, ("supersedes", target_id, reason)))
+                pending_creates.append((fact, vector, ("supersedes", target_id, reason), suggested_tags))
                 counts["superseded"] += 1
                 action_taken = True
                 break
 
             elif rel == "CONTRADICT":
                 # Queue for creation with contradicts link
-                pending_creates.append((fact, vector, ("contradicts", target_id, reason)))
+                pending_creates.append((fact, vector, ("contradicts", target_id, reason), suggested_tags))
                 counts["contradicted"] += 1
                 action_taken = True
                 break
 
             elif rel == "RELATED":
                 # Queue for creation with related_to link
-                pending_creates.append((fact, vector, ("related_to", target_id, reason)))
+                pending_creates.append((fact, vector, ("related_to", target_id, reason), suggested_tags))
                 counts["linked"] += 1
                 action_taken = True
                 break
 
         if not action_taken:
-            pending_creates.append((fact, vector, None))
+            pending_creates.append((fact, vector, None, suggested_tags))
 
     # Phase 2: Consolidate pending creates by grouping similar new facts
     if not pending_creates:
@@ -2985,13 +3088,29 @@ def absorb_memory(
     merged_meta["source"] = source
     merged_meta["confidence"] = confidence
 
+    # Helper: merge suggested tags into caller-provided tags
+    def _merge_tags(base_tags: Optional[List[str]], extra: List[str]) -> Optional[List[str]]:
+        if not extra:
+            return base_tags
+        merged = list(base_tags or [])
+        for t in extra:
+            if t not in merged:
+                merged.append(t)
+        return merged
+
     # Create consolidated memories for grouped pure-new facts
     for group_indices in groups:
         group_facts = [pure_new[gi][1][0] for gi in group_indices]
+        # Union suggested_tags from all facts in the group
+        group_suggested = []
+        for gi in group_indices:
+            group_suggested.extend(pure_new[gi][1][3])
+        group_suggested = _filter_suggested_tags(list(set(group_suggested)))
 
         if len(group_facts) >= 2:
             # Consolidate via LLM
             consolidated = _consolidate_facts_llm(group_facts, context)
+            final_tags = _merge_tags(tags, group_suggested)
             if dry_run:
                 decisions.append({
                     "fact": consolidated[:80],
@@ -3000,7 +3119,7 @@ def absorb_memory(
                     "source_facts": [f[:80] for f in group_facts],
                 })
             else:
-                record = add_memory(conn, content=consolidated, metadata=merged_meta, tags=tags)
+                record = add_memory(conn, content=consolidated, metadata=merged_meta, tags=final_tags)
                 decisions.append({
                     "fact": consolidated[:80],
                     "action": "consolidated",
@@ -3013,22 +3132,24 @@ def absorb_memory(
         else:
             # Single fact — create as-is
             fact = group_facts[0]
+            final_tags = _merge_tags(tags, group_suggested)
             if dry_run:
                 decisions.append({"fact": fact[:80], "action": "create", "reason": "new knowledge"})
             else:
-                record = add_memory(conn, content=fact, metadata=merged_meta, tags=tags)
+                record = add_memory(conn, content=fact, metadata=merged_meta, tags=final_tags)
                 decisions.append({"fact": fact[:80], "action": "created", "memory_id": record["id"], "reason": "new knowledge"})
             counts["created"] += 1
 
     # Create memories with links (supersedes/contradicts/related)
-    for _, (fact, vector, link_info) in linkable:
+    for _, (fact, vector, link_info, fact_suggested) in linkable:
         edge_type, target_id, reason = link_info
         action_label = {"supersedes": "superseded", "contradicts": "contradicted", "related_to": "linked"}[edge_type]
 
+        final_tags = _merge_tags(tags, _filter_suggested_tags(fact_suggested))
         if dry_run:
             decisions.append({"fact": fact[:80], "action": action_label.replace("ed", "e") if action_label != "linked" else "create_and_link", "target_id": target_id, "reason": reason})
         else:
-            record = add_memory(conn, content=fact, metadata=merged_meta, tags=tags)
+            record = add_memory(conn, content=fact, metadata=merged_meta, tags=final_tags)
             try:
                 add_link(conn, record["id"], target_id, edge_type=edge_type)
             except (ValueError, Exception) as link_err:
@@ -3037,6 +3158,86 @@ def absorb_memory(
             decisions.append({"fact": fact[:80], "action": action_label, "memory_id": record["id"], "target_id": target_id, "reason": reason})
 
     return {"decisions": decisions, **counts}
+
+
+def backfill_tags(
+    conn: sqlite3.Connection,
+    *,
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Re-tag existing memories with project-prefixed tags via deterministic normalization.
+
+    Idempotent: re-running produces the same result; already-prefixed tags are unchanged.
+    No LLM calls — uses _normalize_tags() only.
+
+    Args:
+        conn: Database connection
+        dry_run: If True, report proposed changes without writing
+
+    Returns:
+        Dict with processed count, changed count, and list of changes.
+    """
+    rows = conn.execute("SELECT id, content, metadata, tags FROM memories").fetchall()
+
+    processed = 0
+    changed = 0
+    changes: List[Dict[str, Any]] = []
+
+    for row in rows:
+        memory_id = row[0]
+        content = row[1] or ""
+        metadata_json = row[2]
+        tags_json = row[3]
+
+        metadata = None
+        if metadata_json:
+            try:
+                metadata = json.loads(metadata_json)
+            except json.JSONDecodeError:
+                pass
+
+        old_tags: List[str] = []
+        if tags_json:
+            try:
+                old_tags = json.loads(tags_json)
+            except json.JSONDecodeError:
+                pass
+
+        if not isinstance(old_tags, list):
+            old_tags = []
+
+        processed += 1
+        new_tags = _normalize_tags(old_tags, content, metadata)
+
+        if sorted(new_tags) != sorted(old_tags):
+            changed += 1
+            changes.append({
+                "id": memory_id,
+                "old_tags": old_tags,
+                "new_tags": new_tags,
+            })
+
+            if not dry_run:
+                new_tags_json = json.dumps(new_tags, ensure_ascii=False)
+                conn.execute(
+                    "UPDATE memories SET tags = ? WHERE id = ?",
+                    (new_tags_json, memory_id),
+                )
+                # Update FTS index with new tags
+                _fts_upsert(conn, memory_id, content, metadata_json, new_tags_json)
+
+    if not dry_run and changes:
+        conn.commit()
+
+    result: Dict[str, Any] = {
+        "processed": processed,
+        "changed": changed,
+        "changes": changes,
+        "dry_run": dry_run,
+    }
+    if changed > 0 and not dry_run:
+        result["note"] = "Tags updated. Run memory_rebuild_embeddings to refresh semantic search indexes."
+    return result
 
 
 def get_memories_metadata_batch(
@@ -3173,6 +3374,7 @@ def update_memory(
     new_tags = _validate_tags(tags) if tags is not None else existing.get("tags", [])
 
     if tags is not None:
+        new_tags = _normalize_tags(new_tags, new_content, new_metadata)
         _enforce_tag_whitelist(new_tags)
 
     # Check what changed (affects whether we need to recompute indexes)
@@ -4227,6 +4429,7 @@ def import_memories(
             # Prepare data
             prepared_metadata = _prepare_metadata(metadata) if metadata else None
             validated_tags = _validate_tags(tags)
+            validated_tags = _normalize_tags(validated_tags, content, metadata)
             _enforce_tag_whitelist(validated_tags)
 
             metadata_json = json.dumps(prepared_metadata, ensure_ascii=False) if prepared_metadata else None

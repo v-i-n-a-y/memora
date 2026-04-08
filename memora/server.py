@@ -88,6 +88,7 @@ _TOOL_COOLDOWNS: Dict[str, int] = {
     "memory_rebuild_crossrefs": 300,
     "memory_find_duplicates": 120,
     "memory_detect_supersessions": 30,
+    "memory_backfill_tags": 120,
     "memory_migrate_images": 300,
     "memory_insights": 120,
     "memory_export": 60,
@@ -1686,6 +1687,43 @@ async def memory_detect_supersessions(
         _finish_tool("memory_detect_supersessions")
 
     if not dry_run and result.get("supersessions_created", 0) > 0:
+        _schedule_cloud_graph_sync()
+
+    return result
+
+
+@mcp.tool()
+async def memory_backfill_tags(
+    dry_run: bool = True,
+) -> Dict[str, Any]:
+    """Re-tag existing memories with project-prefixed tags.
+
+    Uses deterministic normalization to prefix generic tags (e.g. "plan" → "memora/plan")
+    when the memory content clearly belongs to a specific project. No LLM calls.
+
+    Idempotent: re-running produces the same result.
+
+    Args:
+        dry_run: If True, preview changes without writing (default: True)
+
+    Returns:
+        Dictionary with processed count, changed count, and list of changes.
+
+    Rate limited: 120s cooldown.
+    """
+    if msg := _check_tool_cooldown("memory_backfill_tags"):
+        return {"error": "rate_limited", "message": msg}
+    try:
+        from .storage import backfill_tags
+        with connect() as conn:
+            result = backfill_tags(conn, dry_run=dry_run)
+    except Exception as exc:
+        logger.error("memory_backfill_tags failed: %s", exc, exc_info=True)
+        return _safe_error(exc, "memory_backfill_tags")
+    finally:
+        _finish_tool("memory_backfill_tags")
+
+    if not dry_run and result.get("changed", 0) > 0:
         _schedule_cloud_graph_sync()
 
     return result

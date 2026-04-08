@@ -3291,17 +3291,23 @@ def backfill_tags(
 
         # Auto-assign section if missing
         new_metadata = _auto_assign_section(metadata, content, old_tags)
-        section_changed = (new_metadata or {}).get("section") != (metadata or {}).get("section")
+        old_section = (metadata or {}).get("section")
+        old_subsection = (metadata or {}).get("subsection")
+        new_section = (new_metadata or {}).get("section")
+        new_subsection = (new_metadata or {}).get("subsection")
+        metadata_changed = new_section != old_section or new_subsection != old_subsection
 
-        if sorted(new_tags) != sorted(old_tags) or section_changed:
+        if sorted(new_tags) != sorted(old_tags) or metadata_changed:
             changed += 1
             change_entry: Dict[str, Any] = {
                 "id": memory_id,
                 "old_tags": old_tags,
                 "new_tags": new_tags,
             }
-            if section_changed:
-                change_entry["section_added"] = (new_metadata or {}).get("section")
+            if new_section != old_section:
+                change_entry["section_added"] = new_section
+            if new_subsection != old_subsection:
+                change_entry["subsection_added"] = new_subsection
             changes.append(change_entry)
 
             if not dry_run:
@@ -3310,7 +3316,7 @@ def backfill_tags(
                     "UPDATE memories SET tags = ? WHERE id = ?",
                     (new_tags_json, memory_id),
                 )
-                if section_changed and new_metadata:
+                if metadata_changed and new_metadata:
                     new_meta_json = json.dumps(new_metadata, ensure_ascii=False)
                     conn.execute(
                         "UPDATE memories SET metadata = ? WHERE id = ?",

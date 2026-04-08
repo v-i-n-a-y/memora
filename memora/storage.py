@@ -1448,6 +1448,16 @@ def find_duplicate_candidates(
             if related_id is None:
                 continue
 
+            # Skip typed link entries (supersedes, extends, etc.) — only score-based crossrefs
+            if rel.get("edge_type"):
+                continue
+
+            # Ensure both IDs are ints for consistent comparison
+            try:
+                related_id = int(related_id)
+            except (ValueError, TypeError):
+                continue
+
             if score >= min_similarity:
                 pair_key = tuple(sorted([memory_id, related_id]))
                 if pair_key not in pairs_seen:
@@ -1459,6 +1469,20 @@ def find_duplicate_candidates(
                     })
 
     candidates.sort(key=lambda x: x["similarity_score"], reverse=True)
+
+    # Exclude document fragments/roots BEFORE truncation so we don't
+    # lose valid candidates that would have been within the limit.
+    if candidates:
+        doc_ids: set[int] = set()
+        all_ids = {c["memory_a_id"] for c in candidates} | {c["memory_b_id"] for c in candidates}
+        for mid in all_ids:
+            if _get_metadata_type(conn, mid) in _DOCUMENT_TYPES:
+                doc_ids.add(mid)
+        if doc_ids:
+            candidates = [
+                c for c in candidates
+                if c["memory_a_id"] not in doc_ids and c["memory_b_id"] not in doc_ids
+            ]
 
     return candidates[:limit]
 
@@ -1931,6 +1955,47 @@ def get_crossrefs(conn: sqlite3.Connection, memory_id: int) -> List[Dict[str, An
     return []
 
 
+def _should_skip_crossrefs(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Check if a memory should skip crossref computation.
+
+    Skips for section placeholders and any memory with indexing.skip_crossrefs.
+    Document fragments opt in/out via the skip_fragment_crossrefs parameter
+    on memory_store_document, which sets indexing.skip_crossrefs in metadata.
+    """
+    if not metadata:
+        return False
+    if metadata.get("type") == "section":
+        return True
+    indexing = metadata.get("indexing")
+    if isinstance(indexing, dict) and indexing.get("skip_crossrefs"):
+        return True
+    return False
+
+
+_DOCUMENT_TYPES = ("document_fragment", "document_root")
+
+
+def _is_document_memory(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Check if metadata indicates a document root or fragment."""
+    if not metadata:
+        return False
+    return metadata.get("type") in _DOCUMENT_TYPES
+
+
+def _get_metadata_type(conn: sqlite3.Connection, memory_id: int) -> Optional[str]:
+    """Get the metadata type for a memory (cached-friendly single query)."""
+    row = conn.execute(
+        "SELECT metadata FROM memories WHERE id = ?", (memory_id,)
+    ).fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        meta = json.loads(row[0])
+        return meta.get("type")
+    except (json.JSONDecodeError, TypeError):
+        return None
+
+
 def _update_crossrefs_for_memory(
     conn: sqlite3.Connection,
     memory_id: int,
@@ -1960,10 +2025,13 @@ def _update_crossrefs_for_memory(
         exclude_ids=[memory_id],
     )
 
-    related = [
-        {"id": item["id"], "score": item["score"], "edge_type": "related_to"}
-        for item in results
-    ]
+    # Exclude document fragments/roots from crossref results — they are
+    # structural children of documents and would pollute the similarity graph.
+    related = []
+    for item in results:
+        if _get_metadata_type(conn, item["id"]) in _DOCUMENT_TYPES:
+            continue
+        related.append({"id": item["id"], "score": item["score"], "edge_type": "related_to"})
     _store_crossrefs(conn, memory_id, related)
     return related
 
@@ -2681,10 +2749,9 @@ def add_memory(
     vector = _compute_embedding(content, prepared_metadata, validated_tags)
     _upsert_embedding(conn, memory_id, vector)
 
-    # Compute cross-refs (skip for section memories, pass pre-computed vector)
+    # Compute cross-refs (skip for section memories and document fragments)
     related: List[Dict[str, Any]] = []
-    is_section = prepared_metadata and prepared_metadata.get("type") == "section"
-    if not is_section:
+    if not _should_skip_crossrefs(prepared_metadata):
         related = _update_crossrefs_for_memory(conn, memory_id, vector=vector)
 
     _log_action(conn, memory_id, "create", f"Created memory #{memory_id}")
@@ -2774,11 +2841,10 @@ def add_memories(
         _fts_upsert(conn, memory_id, entry["content"], entry["metadata_json"], entry["tags_json"])
         _upsert_embedding(conn, memory_id, vector)
 
-    # Compute cross-refs after all embeddings are stored (skip section memories)
+    # Compute cross-refs after all embeddings are stored (skip sections + document fragments)
     all_related: List[List[Dict[str, Any]]] = []
     for memory_id, entry, vector in zip(inserted, rows, embeddings):
-        is_section = entry["prepared_metadata"] and entry["prepared_metadata"].get("type") == "section"
-        if is_section:
+        if _should_skip_crossrefs(entry["prepared_metadata"]):
             all_related.append([])
         else:
             all_related.append(_update_crossrefs_for_memory(conn, memory_id, vector=vector))
@@ -3073,6 +3139,14 @@ def absorb_memory(
         except Exception as e:
             logger.warning("Absorb search failed for fact: %s — %s", fact[:50], e, exc_info=True)
             matches = []
+
+        # Exclude document fragments/roots — they are structural, not standalone
+        matches = [
+            m for m in matches
+            if not _is_document_memory(
+                (m.get("memory") or m).get("metadata")
+            )
+        ]
 
         # No similar memories — queue for creation
         if not matches:

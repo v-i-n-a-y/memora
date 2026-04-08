@@ -63,6 +63,16 @@ def _safe_error(e: Exception, context: str = "operation") -> Dict[str, str]:
     return {"error": f"{context}_failed", "message": f"The {context} failed. Check server logs for details."}
 
 
+_DOCUMENT_TYPES = ("document_fragment", "document_root")
+
+
+def _is_doc_memory(metadata: Optional[Dict[str, Any]]) -> bool:
+    """Check if metadata indicates a document root or fragment."""
+    if not metadata:
+        return False
+    return metadata.get("type") in _DOCUMENT_TYPES
+
+
 # Content type inference patterns
 TYPE_PATTERNS: List[tuple[str, str]] = [
     (r'^(?:TODO|TASK)[:>\s]', 'todo'),
@@ -1039,6 +1049,319 @@ async def memory_absorb(
     return result
 
 
+@mcp.tool()
+async def memory_store_document(
+    content: str,
+    document_key: str,
+    version: int = 1,
+    tags: Optional[list[str]] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    skip_fragment_crossrefs: bool = True,
+) -> Dict[str, Any]:
+    """Store a structured document as a root memory + searchable fragments.
+
+    Parses markdown into typed fragments (claims, plan items, references,
+    risks, section chunks) that are individually searchable while the full
+    document remains retrievable as a unit.
+
+    Args:
+        content: Full markdown document content
+        document_key: Stable identifier (e.g. "research/memora-enhancements-2026-04-08")
+        version: Document version (default: 1). If >1, supersedes previous version.
+        tags: Tags applied to root and fragments
+        metadata: Additional metadata merged into root and fragments
+        skip_fragment_crossrefs: If True, fragments skip crossref computation (default: True)
+
+    Returns:
+        {document_key, root_id, fragment_count, node_map: {node_kind: [ids]}}
+    """
+    from .document import parse_document
+
+    try:
+        plan = parse_document(
+            content, document_key, version=version,
+            tags=tags, metadata=metadata,
+            skip_fragment_crossrefs=skip_fragment_crossrefs,
+        )
+    except Exception as exc:
+        return {"error": "parse_error", "message": str(exc)}
+
+    # 1. Create document root
+    try:
+        root = _create_memory(
+            content=plan.root_content,
+            metadata=plan.root_metadata,
+            tags=plan.root_tags,
+        )
+    except ValueError as exc:
+        return {"error": "invalid_input", "message": f"Root creation failed: {exc}"}
+
+    root_id = root["id"]
+
+    # 2. Create fragments via batch insert
+    fragment_entries = []
+    for frag in plan.fragments:
+        entry: Dict[str, Any] = {
+            "content": frag.content,
+            "metadata": frag.metadata,
+            "tags": list(plan.root_tags),
+        }
+        fragment_entries.append(entry)
+
+    fragment_ids: List[int] = []
+    node_map: Dict[str, List[int]] = {}
+
+    if fragment_entries:
+        try:
+            records = _create_memories(fragment_entries)
+        except ValueError as exc:
+            return {
+                "error": "fragment_error",
+                "message": str(exc),
+                "root_id": root_id,
+                "partial": True,
+            }
+
+        # 3. Link fragments to root and build node_map
+        for record, frag in zip(records, plan.fragments):
+            fid = record["id"]
+            fragment_ids.append(fid)
+            node_map.setdefault(frag.node_kind, []).append(fid)
+
+            # Link fragment → root
+            try:
+                _add_link(fid, root_id, "extends", bidirectional=True)
+            except Exception:
+                pass  # non-fatal — link failure shouldn't block storage
+
+        # 4. Link claims to references by matching URLs
+        _link_claims_to_references(records, plan.fragments, node_map)
+
+    # 5. If version > 1, find and supersede previous root
+    if version > 1:
+        _supersede_previous_version(root_id, document_key, version)
+
+    _schedule_cloud_graph_sync()
+
+    return {
+        "document_key": document_key,
+        "version": version,
+        "root_id": root_id,
+        "fragment_count": len(fragment_ids),
+        "node_map": node_map,
+    }
+
+
+def _link_claims_to_references(
+    records: List[Dict[str, Any]],
+    fragments: list,
+    node_map: Dict[str, List[int]],
+) -> None:
+    """Link claim memories to reference memories by matching source URLs."""
+    ref_ids = node_map.get("reference", [])
+    if not ref_ids:
+        return
+
+    # Build URL → ref_id map
+    url_to_ref: Dict[str, int] = {}
+    for record, frag in zip(records, fragments):
+        if frag.node_kind == "reference":
+            for url in frag.metadata.get("source_urls", []):
+                url_to_ref[url] = record["id"]
+
+    # Link claims that mention reference URLs
+    for record, frag in zip(records, fragments):
+        if frag.node_kind != "claim":
+            continue
+        content_lower = frag.content.lower()
+        for url, ref_id in url_to_ref.items():
+            if url.lower() in content_lower:
+                try:
+                    _add_link(record["id"], ref_id, "references", bidirectional=True)
+                except Exception:
+                    pass
+
+
+def _supersede_previous_version(
+    new_root_id: int,
+    document_key: str,
+    new_version: int,
+) -> None:
+    """Find the immediate predecessor root and create a supersedes link (chain, not fan-out)."""
+    try:
+        results = _list_memories(
+            query=None,
+            metadata_filters={"document_key": document_key, "type": "document_root"},
+            limit=50, offset=0,
+            date_from=None, date_to=None,
+            tags_any=None, tags_all=None, tags_none=None,
+            sort_by_importance=False,
+        )
+        # Find the immediate predecessor (highest version < new_version)
+        predecessor_id = None
+        predecessor_version = -1
+        for mem in results:
+            meta = mem.get("metadata", {})
+            v = meta.get("document_version", 0)
+            if v < new_version and v > predecessor_version and mem["id"] != new_root_id:
+                predecessor_id = mem["id"]
+                predecessor_version = v
+        if predecessor_id is not None:
+            _add_link(new_root_id, predecessor_id, "supersedes", bidirectional=True)
+    except Exception:
+        pass  # non-fatal
+
+
+@mcp.tool()
+async def memory_get_document(
+    document_key: str,
+    content_mode: str = "preview",
+    preview_chars: int = 120,
+    node_kinds: Optional[List[str]] = None,
+    version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Retrieve a stored document and its fragments by document key.
+
+    Args:
+        document_key: The document identifier used during storage
+        content_mode: "preview" (default) or "full" for fragment content
+        preview_chars: Max chars for preview mode (default: 120)
+        node_kinds: Optional filter — e.g. ["claim", "plan_item"] for specific fragment types
+        version: Optional version filter. If omitted, returns the latest version.
+
+    Returns:
+        {root: {...}, fragments: [...] ordered by ordinal, document_key, version}
+    """
+    filters: Dict[str, Any] = {"document_key": document_key}
+    if version is not None:
+        filters["document_version"] = version
+
+    # Don't use follow="active" — it would hide superseded roots,
+    # breaking historical version retrieval. Filter manually instead.
+    results = _list_memories(
+        query=None,
+        metadata_filters=filters,
+        limit=-1, offset=0,
+        date_from=None, date_to=None,
+        tags_any=None, tags_all=None, tags_none=None,
+        sort_by_importance=False,
+    )
+    memories = results if isinstance(results, list) else results.get("memories", [])
+    if not memories:
+        return {"error": "not_found", "message": f"No document found with key '{document_key}'"}
+
+    # Separate root from fragments
+    root = None
+    fragments = []
+    for mem in memories:
+        meta = mem.get("metadata", {})
+        if meta.get("type") == "document_root":
+            # If no version specified, pick the highest version root
+            if root is None:
+                root = mem
+            elif meta.get("document_version", 0) > root.get("metadata", {}).get("document_version", 0):
+                root = mem
+        elif meta.get("type") == "document_fragment":
+            fragments.append(mem)
+
+    if root is None:
+        return {"error": "not_found", "message": f"No document root found for key '{document_key}'"}
+
+    # Filter fragments by version (match root's version)
+    root_version = root.get("metadata", {}).get("document_version", 1)
+    fragments = [
+        f for f in fragments
+        if f.get("metadata", {}).get("document_version", 1) == root_version
+    ]
+
+    # Filter by node_kinds if specified
+    if node_kinds:
+        fragments = [
+            f for f in fragments
+            if f.get("metadata", {}).get("node_kind") in node_kinds
+        ]
+
+    # Sort by ordinal
+    fragments.sort(key=lambda f: f.get("metadata", {}).get("ordinal", 0))
+
+    # Apply content mode
+    if content_mode == "preview":
+        for frag in fragments:
+            if "content" in frag and len(frag["content"]) > preview_chars:
+                frag["content_preview"] = frag["content"][:preview_chars] + "..."
+                del frag["content"]
+            elif "content" in frag:
+                frag["content_preview"] = frag["content"]
+                del frag["content"]
+        # Root always returns full content for document retrieval
+    elif content_mode != "full":
+        return {"error": "invalid_input", "message": f"content_mode must be 'preview' or 'full'"}
+
+    return {
+        "document_key": document_key,
+        "version": root_version,
+        "root": root,
+        "fragments": fragments,
+        "fragment_count": len(fragments),
+    }
+
+
+@mcp.tool()
+async def memory_delete_document(
+    document_key: str,
+    version: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Delete a stored document and all its fragments.
+
+    Args:
+        document_key: The document identifier
+        version: Optional — delete only this version. If omitted, deletes all versions.
+
+    Returns:
+        {deleted_roots: count, deleted_fragments: count, deleted_ids: [...]}
+    """
+    filters: Dict[str, Any] = {"document_key": document_key}
+    if version is not None:
+        filters["document_version"] = version
+
+    results = _list_memories(
+        query=None,
+        metadata_filters=filters,
+        limit=-1, offset=0,
+        date_from=None, date_to=None,
+        tags_any=None, tags_all=None, tags_none=None,
+        sort_by_importance=False,
+    )
+    memories = results if isinstance(results, list) else results.get("memories", [])
+    if not memories:
+        return {"error": "not_found", "message": f"No document found with key '{document_key}'"}
+
+    # Only delete memories that are actually document roots or fragments
+    memories = [
+        m for m in memories
+        if m.get("metadata", {}).get("type") in ("document_root", "document_fragment")
+    ]
+    if not memories:
+        return {"error": "not_found", "message": f"No document memories found for key '{document_key}'"}
+
+    ids = [m["id"] for m in memories]
+    root_count = sum(
+        1 for m in memories
+        if m.get("metadata", {}).get("type") == "document_root"
+    )
+    fragment_count = len(ids) - root_count
+
+    deleted = _delete_memories(ids)
+    _schedule_cloud_graph_sync()
+
+    return {
+        "deleted_roots": root_count,
+        "deleted_fragments": fragment_count,
+        "deleted_ids": ids,
+        "total_deleted": deleted,
+    }
+
+
 def _apply_search_fields_projection(
     results: List[Dict[str, Any]],
     fields: List[str],
@@ -1137,8 +1460,27 @@ async def memory_update(
 
 
 @mcp.tool()
-async def memory_delete(memory_id: int) -> Dict[str, Any]:
-    """Delete a memory by id."""
+async def memory_delete(memory_id: int, force: bool = False) -> Dict[str, Any]:
+    """Delete a memory by id.
+
+    Args:
+        memory_id: Memory ID to delete
+        force: If True, allow deleting document fragments/roots.
+               Use memory_delete_document() instead for clean document removal.
+    """
+    if not force:
+        mem = _get_memory(memory_id)
+        if mem and _is_doc_memory(mem.get("metadata")):
+            doc_key = (mem.get("metadata") or {}).get("document_key", "unknown")
+            return {
+                "error": "protected_fragment",
+                "message": (
+                    f"Memory #{memory_id} is part of document '{doc_key}'. "
+                    f"Use memory_delete_document() for clean removal, "
+                    f"or pass force=True to delete this memory only."
+                ),
+            }
+
     if _delete_memory(memory_id):
         _schedule_cloud_graph_sync()
         return {"status": "deleted", "id": memory_id}
@@ -1759,6 +2101,14 @@ async def memory_merge(
         return {"error": "not_found", "message": f"Source memory #{source_id} not found"}
     if not target:
         return {"error": "not_found", "message": f"Target memory #{target_id} not found"}
+
+    # Guard: refuse to merge document fragments
+    if _is_doc_memory(source.get("metadata")) or _is_doc_memory(target.get("metadata")):
+        return {
+            "error": "protected_fragment",
+            "message": "Cannot merge document fragments or roots. "
+                       "Modify the source document and re-store instead.",
+        }
 
     # Combine content based on strategy
     if merge_strategy == "prepend":

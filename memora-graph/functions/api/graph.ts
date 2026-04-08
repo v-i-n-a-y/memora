@@ -247,6 +247,10 @@ function isSection(metadata: Record<string, unknown> | null): boolean {
   return metadata?.type === "section";
 }
 
+function isDocumentFragment(metadata: Record<string, unknown> | null): boolean {
+  return metadata?.type === "document_fragment";
+}
+
 function isIssue(metadata: Record<string, unknown> | null): boolean {
   return metadata?.type === "issue";
 }
@@ -335,13 +339,16 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
     connectionCounts.set(edge.to, (connectionCounts.get(edge.to) || 0) + 1);
   }
 
-  // Find duplicates
-  const memoryIds = new Set(memories.filter(m => !isSection(parseJson(m.metadata, null))).map(m => m.id));
+  // Find duplicates (exclude sections and document fragments)
+  const memoryIds = new Set(memories.filter(m => {
+    const meta = parseJson<Record<string, unknown>>(m.metadata, null);
+    return !isSection(meta) && !isDocumentFragment(meta);
+  }).map(m => m.id));
   const duplicateIds = new Set<number>();
 
   for (const m of memories) {
     const meta = parseJson<Record<string, unknown>>(m.metadata, {});
-    if (isSection(meta)) continue;
+    if (isSection(meta) || isDocumentFragment(meta)) continue;
 
     const refs = crossrefsMap.get(m.id) || [];
     for (const ref of refs) {
@@ -367,8 +374,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
   for (const m of memories) {
     const meta = parseJson<Record<string, unknown>>(m.metadata, {});
 
-    // Skip section memories
-    if (isSection(meta)) continue;
+    // Skip section memories and document fragments
+    if (isSection(meta) || isDocumentFragment(meta)) continue;
 
     const tags = parseJson<string[]>(m.tags, []);
     const primaryTag = tags[0] || "untagged";
@@ -447,8 +454,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
     const meta = parseJson<Record<string, unknown>>(m.metadata, {});
     const tags = parseJson<string[]>(m.tags, []);
 
-    // Skip sections for mappings
-    if (isSection(meta)) continue;
+    // Skip sections and document fragments for mappings
+    if (isSection(meta) || isDocumentFragment(meta)) continue;
 
     // Tags mapping
     for (const tag of tags) {

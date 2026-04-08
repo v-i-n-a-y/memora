@@ -89,15 +89,25 @@ def is_section(metadata: Optional[Dict]) -> bool:
     return metadata.get("type") == "section"
 
 
+def _is_document_fragment(metadata: Optional[Dict]) -> bool:
+    """Check if metadata indicates a document fragment (not root)."""
+    if not metadata:
+        return False
+    return metadata.get("type") == "document_fragment"
+
+
 def _find_duplicate_ids(conn, memories: List[Dict]) -> set:
     """Find memory IDs that have duplicates (similarity >= threshold).
 
     A memory is marked as duplicate if it has a cross-reference with
     score >= DUPLICATE_THRESHOLD to another memory in the current view.
-    Section memories are excluded from duplicate detection.
+    Section memories and document fragments are excluded from duplicate detection.
     """
-    # Exclude section memories from duplicate detection
-    non_section_memories = [m for m in memories if not is_section(m.get("metadata"))]
+    # Exclude section memories and document fragments from duplicate detection
+    non_section_memories = [
+        m for m in memories
+        if not is_section(m.get("metadata")) and not _is_document_fragment(m.get("metadata"))
+    ]
     memory_ids = {m["id"] for m in non_section_memories}
     duplicate_ids = set()
 
@@ -177,8 +187,8 @@ def _build_nodes(
 
     nodes = []
     for m in memories:
-        # Skip section memories - they are not visible in the graph
-        if is_section(m.get("metadata")):
+        # Skip section memories and document fragments - they are not visible in the graph
+        if is_section(m.get("metadata")) or _is_document_fragment(m.get("metadata")):
             continue
         tags = m.get("tags", [])
         primary_tag = tags[0] if tags else "untagged"
@@ -244,11 +254,11 @@ def _build_nodes(
 
 
 def _build_tag_to_nodes(memories: List[Dict]) -> Dict[str, List[int]]:
-    """Build tag -> node IDs mapping. Section memories are excluded."""
+    """Build tag -> node IDs mapping. Section memories and document fragments are excluded."""
     tag_to_nodes: Dict[str, List[int]] = {}
     for m in memories:
-        # Skip section memories - they're not visible in graph
-        if is_section(m.get("metadata")):
+        # Skip section memories and document fragments - they're not visible in graph
+        if is_section(m.get("metadata")) or _is_document_fragment(m.get("metadata")):
             continue
         for tag in m.get("tags", []):
             if tag not in tag_to_nodes:

@@ -175,10 +175,6 @@ DEFAULT_GRAPH_PORT = _read_int_env("MEMORA_GRAPH_PORT", 8765)
 
 mcp = FastMCP("Memory MCP Server", host=DEFAULT_HOST, port=DEFAULT_PORT)
 
-# Register REST API routes for clmux daemon integration
-from .http_api import register_rest_routes  # noqa: E402
-register_rest_routes(mcp)
-
 
 def _with_connection(func=None, *, writes=False):
     """Decorator that manages database connections and cloud sync.

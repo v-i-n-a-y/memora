@@ -63,9 +63,41 @@ def register_rest_routes(mcp) -> None:
             )
 
         top_k = body.get("top_k", 7)
-        tags_any = body.get("tags_any")
-        content_mode = body.get("content_mode", "preview")
+        try:
+            top_k = int(top_k)
+            if top_k <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "invalid_input", "message": "top_k must be a positive integer"},
+                status_code=400,
+            )
+
         preview_chars = body.get("preview_chars", 300)
+        try:
+            preview_chars = int(preview_chars)
+            if preview_chars <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            return JSONResponse(
+                {"error": "invalid_input", "message": "preview_chars must be a positive integer"},
+                status_code=400,
+            )
+
+        tags_any = body.get("tags_any")
+        if tags_any is not None:
+            if not isinstance(tags_any, list) or not all(isinstance(t, str) for t in tags_any):
+                return JSONResponse(
+                    {"error": "invalid_input", "message": "tags_any must be a list of strings or null"},
+                    status_code=400,
+                )
+
+        content_mode = body.get("content_mode", "preview")
+        if content_mode not in ("preview", "full"):
+            return JSONResponse(
+                {"error": "invalid_input", "message": "content_mode must be \"preview\" or \"full\""},
+                status_code=400,
+            )
 
         try:
             conn = connect()

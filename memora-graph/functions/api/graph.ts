@@ -301,14 +301,14 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
   const memories = memoriesResult.results;
 
   // Fetch all crossrefs (table may not exist on some D1 databases)
-  const crossrefsMap = new Map<number, Array<{ id: number; score: number }>>();
+  const crossrefsMap = new Map<number, Array<{ id: number; score: number; edge_type?: string }>>();
   try {
     const crossrefsResult = await db.prepare(
       "SELECT memory_id, related FROM memories_crossrefs"
     ).all<CrossRef>();
 
     for (const cr of crossrefsResult.results || []) {
-      const related = parseJson<Array<{ id: number; score: number }>>(cr.related, []);
+      const related = parseJson<Array<{ id: number; score: number; edge_type?: string }>>(cr.related, []);
       crossrefsMap.set(cr.memory_id, related);
     }
   } catch {
@@ -339,7 +339,15 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
     connectionCounts.set(edge.to, (connectionCounts.get(edge.to) || 0) + 1);
   }
 
-  // Find duplicates (exclude sections and document fragments)
+  // Find duplicates (exclude sections and document fragments).
+  // Filter rules — must match find_duplicate_candidates() in storage.py
+  // and the /api/duplicates endpoint:
+  //   - skip typed link entries (supersedes, references, extends, ...) —
+  //     `related_to` is allowed because compute_crossrefs uses it as the
+  //     default tag for score-based refs.
+  //   - skip score >= 0.9999 — these are absorb's link_memories writes
+  //     with hardcoded 1.0, not real cosine matches. Cosine of non-
+  //     identical vectors is mathematically always < 1.0.
   const memoryIds = new Set(memories.filter(m => {
     const meta = parseJson<Record<string, unknown>>(m.metadata, null);
     return !isSection(meta) && !isDocumentFragment(meta);
@@ -352,6 +360,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
 
     const refs = crossrefsMap.get(m.id) || [];
     for (const ref of refs) {
+      if (ref.edge_type && ref.edge_type !== "related_to") continue;
+      if (ref.score >= 0.9999) continue;
       if (ref.score >= DUPLICATE_THRESHOLD && memoryIds.has(ref.id)) {
         duplicateIds.add(m.id);
         duplicateIds.add(ref.id);

@@ -1615,16 +1615,28 @@ div.vis-tooltip {
             if (selected) selected.scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
 
+        // Per-memory request sequence counter for toggleFavorite. Rapid clicks
+        // increment the counter; responses from superseded requests are
+        // ignored so out-of-order completions can't leave the cache at an
+        // older state. See memora issue #541.
+        var favoriteSeq = {};
+
         function toggleFavorite(memId, el) {
             var isActive = el.classList.contains('active');
             var newState = !isActive;
             el.classList.toggle('active', newState);
             el.textContent = newState ? '\u2605' : '\u2606';
+            // Bump sequence number so any in-flight request for this memory
+            // gets ignored on completion (last click wins).
+            var seq = (favoriteSeq[memId] || 0) + 1;
+            favoriteSeq[memId] = seq;
             // Use the dedicated `favorite` top-level field on PATCH. Sending it via
             // `metadata` merges client-side keys server-side, so `delete metadata.favorite`
             // never reaches the server and un-favoriting silently fails.
             patchMemory(memId, { favorite: newState })
                 .then(function(updated) {
+                    // Ignore responses from superseded clicks.
+                    if (favoriteSeq[memId] !== seq) return;
                     memoryCache[memId] = updated;
                     if (cachedTimelineMemories) {
                         cachedTimelineMemories.forEach(function(mem, index) {
@@ -1634,8 +1646,18 @@ div.vis-tooltip {
                     if (currentPanelMemoryId === memId && !panelEditMode) {
                         showPanel(updated);
                     }
+                    // #542: re-render the timeline list when in Favorites
+                    // filter so the row disappears immediately on un-favorite
+                    // (and reappears on favorite). Without this the DOM stays
+                    // stale until the user switches filters or reloads.
+                    if (timelineFilter === 'favorites' && cachedTimelineMemories) {
+                        renderTimelineList(cachedTimelineMemories);
+                    }
                 })
                 .catch(function() {
+                    // Ignore errors from superseded clicks — don't revert UI
+                    // that a later click has already overwritten.
+                    if (favoriteSeq[memId] !== seq) return;
                     el.classList.toggle('active', isActive);
                     el.textContent = isActive ? '\u2605' : '\u2606';
                 });

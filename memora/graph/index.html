@@ -2423,6 +2423,12 @@ div.vis-tooltip {
                 try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
             });
 
+            // Re-enable physics during drag so the graph feels elastic.
+            // The 'stabilized' handler disables it again when motion settles.
+            network.on('dragStart', function() {
+                try { network.setOptions({ physics: { enabled: true } }); } catch (_) {}
+            });
+
             // Init cluster hull overlays
             initClusterHulls();
 

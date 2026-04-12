@@ -2415,6 +2415,14 @@ div.vis-tooltip {
             };
             network = new vis.Network(container, data, options);
 
+            // Disable physics after every stabilization — realtime updates
+            // (nodes.add from SSE/WS) automatically restart physics. Without
+            // this handler, the simulation keeps spinning indefinitely,
+            // burning CPU at ~10-30% per tab even when idle.
+            network.on('stabilized', function() {
+                try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
+            });
+
             // Init cluster hull overlays
             initClusterHulls();
 
@@ -2538,11 +2546,20 @@ div.vis-tooltip {
                 var fired = false;
                 network.once('stabilizationIterationsDone', function() {
                     fired = true;
+                    // Disable physics after stabilization — keeps CPU at 0
+                    // when idle. Without this, vis-network's simulation loop
+                    // runs indefinitely, causing constant ~10-30% CPU use.
+                    try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
                     openDefault();
                 });
                 // Safety net: if stabilization event never fires (empty graph,
                 // already-stable seed, etc.), open the panel after a short delay.
-                setTimeout(function() { if (!fired) openDefault(); }, 1500);
+                setTimeout(function() {
+                    if (!fired) {
+                        try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
+                        openDefault();
+                    }
+                }, 1500);
             } else {
                 openDefault();
             }
@@ -2691,6 +2708,9 @@ div.vis-tooltip {
                 graphData.edges = processedEdges;
 
                 seedClusterPositions(graphData.nodes);
+                // Re-enable physics so new nodes settle into position.
+                // The 'stabilized' handler will disable it again once done.
+                try { network.setOptions({ physics: { enabled: true } }); } catch (_) {}
                 nodes.add(graphData.nodes);
                 edges.add(processedEdges);
 

@@ -2419,21 +2419,31 @@ div.vis-tooltip {
             // (nodes.add from SSE/WS) automatically restart physics. Without
             // this handler, the simulation keeps spinning indefinitely,
             // burning CPU at ~10-30% per tab even when idle.
+            // Physics lifecycle: enabled during drag and for a brief settle
+            // period after, then disabled to keep idle CPU at 0. We don't
+            // rely on the 'stabilized' event alone because barnesHut with
+            // damping 0.3 may never fully converge on large graphs.
+            var physicsOffTimer = null;
+            function schedulePhysicsOff(delayMs) {
+                if (physicsOffTimer) clearTimeout(physicsOffTimer);
+                physicsOffTimer = setTimeout(function() {
+                    try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
+                    physicsOffTimer = null;
+                }, delayMs);
+            }
             network.on('stabilized', function() {
-                try { network.setOptions({ physics: { enabled: false } }); } catch (_) {}
+                schedulePhysicsOff(0);
             });
-
-            // Re-enable physics during drag so the graph feels elastic.
-            // The 'stabilized' handler disables it again when motion settles.
             network.on('dragStart', function() {
+                if (physicsOffTimer) { clearTimeout(physicsOffTimer); physicsOffTimer = null; }
                 try {
                     network.setOptions({ physics: { enabled: true } });
                     network.startSimulation();
                 } catch (_) {}
             });
-            // Also kick the simulation on dragEnd so released nodes settle elastically
             network.on('dragEnd', function() {
-                try { network.startSimulation(); } catch (_) {}
+                // Give the graph ~1.5s to settle elastically, then force-stop
+                schedulePhysicsOff(1500);
             });
 
             // Init cluster hull overlays

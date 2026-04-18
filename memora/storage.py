@@ -2887,17 +2887,24 @@ def add_memory(
         memory_id = cur.lastrowid
 
     _fts_upsert(conn, memory_id, content, metadata_json, tags_json)
-    vector = _compute_embedding(content, prepared_metadata, validated_tags)
-    _upsert_embedding(conn, memory_id, vector)
-
-    # Compute cross-refs (skip for section memories and document fragments)
-    related: List[Dict[str, Any]] = []
-    if not _should_skip_crossrefs(prepared_metadata):
-        related = _update_crossrefs_for_memory(conn, memory_id, vector=vector)
 
     _log_action(conn, memory_id, "create", f"Created memory #{memory_id}")
     conn.commit()
     _emit_event(conn, memory_id, validated_tags)
+
+    # Embedding + crossref scan are the slow half (~1-2 s OpenAI call plus
+    # a JOIN over the full memories table). Hand them to the background
+    # worker so this MCP call returns immediately; results land in the DB
+    # a moment later and trigger a graph broadcast via schedule_sync().
+    # If no worker is running (tests, scripts), we run inline on ``conn``
+    # so semantics match the pre-worker behavior.
+    from .background import enqueue_embedding_job, run_embedding_job_inline
+    if enqueue_embedding_job(memory_id, update_crossrefs=True):
+        related: List[Dict[str, Any]] = []
+        embedding_pending = True
+    else:
+        related = run_embedding_job_inline(conn, memory_id, update_crossrefs=True)
+        embedding_pending = False
 
     # Construct result locally (avoids re-fetch and D1 read replica lag)
     result: Dict[str, Any] = {
@@ -2912,6 +2919,7 @@ def add_memory(
         "last_accessed": None,
         "importance_score": calculate_importance(now, 1.0, 0),
         "related": related,
+        "embedding_pending": embedding_pending,
     }
     return result
 
@@ -3724,21 +3732,22 @@ def update_memory(
         # Row wasn't updated - this shouldn't happen since we checked existence
         raise RuntimeError(f"UPDATE affected 0 rows for memory {memory_id}")
 
-    # Recompute indexes when content, tags, or metadata changed
+    # Recompute FTS inline — it's a local index, not an HTTP call.
     if index_changed:
-        # Update FTS index
         _fts_upsert(conn, memory_id, new_content, metadata_json, tags_json)
-
-        # Update embeddings (calls OpenAI API - ~1-2 sec)
-        vector = _compute_embedding(new_content, new_metadata, new_tags)
-        _upsert_embedding(conn, memory_id, vector)
-
-        # Skip cross-references update - too expensive for D1 HTTP API (~15 sec)
-        # Cross-refs remain valid enough until manual rebuild via memory_rebuild_crossrefs
 
     _log_action(conn, memory_id, "update", f"Updated memory #{memory_id}")
     conn.commit()
     _emit_event(conn, memory_id, new_tags)
+
+    # Embedding (OpenAI ~1-2 s) moves to the background worker, but only
+    # AFTER the row is committed — otherwise the worker can read the old
+    # version. Crossrefs are left untouched on update (matching prior
+    # behavior); a manual memory_rebuild_crossrefs recomputes them.
+    if index_changed:
+        from .background import enqueue_embedding_job, run_embedding_job_inline
+        if not enqueue_embedding_job(memory_id, update_crossrefs=False):
+            run_embedding_job_inline(conn, memory_id, update_crossrefs=False)
 
     # Return the data we just wrote instead of reading back from DB
     # This avoids D1 read replica lag issues where reads immediately

@@ -2601,6 +2601,11 @@ def main(argv: Optional[list[str]] = None) -> None:
             logger.warning("Database pre-warm failed: %s", e)
             print(f"Warning: Database pre-warm failed: {e}", file=sys.stderr)
 
+        # Start background embedding worker so memory_create / memory_update
+        # can return before the OpenAI call + crossref scan finish.
+        from .background import start_worker as _start_embedding_worker
+        _start_embedding_worker()
+
         # Start graph visualization server unless disabled
         if not args.no_graph:
             start_graph_server(args.host, args.graph_port)

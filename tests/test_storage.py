@@ -230,6 +230,42 @@ def test_list_memories_filtered_pagination(local_db):
             assert "match" in r["tags"], f"Row {r['id']} missing 'match' tag"
 
 
+def test_add_memory_worker_path_is_async(local_db):
+    """With a worker running, add_memory returns before the embedding lands.
+
+    The response should carry embedding_pending=True and an empty related
+    list, and the embedding row should appear only after flush().
+    """
+    from memora import background
+
+    background.start_worker()
+    try:
+        with storage.connect() as conn:
+            mem = storage.add_memory(
+                conn,
+                content="Worker-path test memory content here",
+                tags=["worker-test"],
+            )
+            # Fast-path contract: embedding not yet computed.
+            assert mem["embedding_pending"] is True
+            assert mem["related"] == []
+
+            background.flush(timeout=10.0)
+
+            emb = conn.execute(
+                "SELECT embedding FROM memories_embeddings WHERE memory_id = ?",
+                (mem["id"],),
+            ).fetchone()
+            assert emb is not None and emb[0], "Worker did not persist embedding"
+    finally:
+        # Reset global worker state so later tests re-exercise the inline path.
+        background._QUEUE.put(None)
+        if background._WORKER is not None:
+            background._WORKER.join(timeout=5.0)
+        background._WORKER = None
+        background._QUEUE = background.queue.Queue()
+
+
 def test_tag_whitelist_enforcement(local_db, monkeypatch):
     """Adding memory with invalid tag should raise when whitelist is active."""
     monkeypatch.setattr(memora, "TAG_WHITELIST", {"allowed-tag"})

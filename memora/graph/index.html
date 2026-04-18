@@ -2431,6 +2431,11 @@ div.vis-tooltip {
                     physicsOffTimer = null;
                 }, delayMs);
             }
+            // Expose so reloadGraphData (and any other realtime-update path
+            // that re-enables physics) can fall back to this if the
+            // 'stabilized' event never fires — the real root cause of the
+            // "graph spins forever after memory update" bug.
+            window.__schedulePhysicsOff = schedulePhysicsOff;
             network.on('stabilized', function() {
                 schedulePhysicsOff(0);
             });
@@ -2732,10 +2737,15 @@ div.vis-tooltip {
 
                 seedClusterPositions(graphData.nodes);
                 // Re-enable physics so new nodes settle into position.
-                // The 'stabilized' handler will disable it again once done.
+                // The 'stabilized' handler will disable it again — BUT on
+                // large graphs with barnesHut damping 0.3 'stabilized' may
+                // never fire, leaving physics spinning forever (observed
+                // after memory_update via SSE/WS). Schedule a hard shut-off
+                // ~3s later as a safety net.
                 try { network.setOptions({ physics: { enabled: true } }); } catch (_) {}
                 nodes.add(graphData.nodes);
                 edges.add(processedEdges);
+                if (window.__schedulePhysicsOff) window.__schedulePhysicsOff(3000);
 
                 // Update legends
                 updateLegends();

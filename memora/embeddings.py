@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
@@ -13,6 +14,31 @@ _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # Cache for embedding models
 _embedding_model_cache: Dict[str, Any] = {}
+
+logger = logging.getLogger(__name__)
+
+# Log each unique (model, error) fallback only once per process to avoid
+# spamming on every call. The fix for silent-fallback-bug #454 needs to
+# be loud enough that misconfiguration is noticed but quiet enough that
+# downstream callers don't drown in warnings during bulk reindex.
+_fallback_warned: set = set()
+
+
+def _warn_openai_fallback(reason: str, model_name: Optional[str] = None) -> None:
+    key = f"{model_name}::{reason}"
+    if key in _fallback_warned:
+        return
+    _fallback_warned.add(key)
+    logger.warning(
+        "memora: OpenAI embedding request failed — falling back to TF-IDF. "
+        "model=%s reason=%s. "
+        "Similarity quality will degrade. "
+        "Check OPENAI_API_KEY, OPENAI_BASE_URL, and (for OpenRouter) that "
+        "the allowed-providers list includes the provider that serves this "
+        "embedding model. See memory #454.",
+        model_name or os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small"),
+        reason,
+    )
 
 
 def _get_embedding_text(
@@ -71,18 +97,19 @@ def _compute_embedding_sentence_transformers(text: str) -> Dict[str, float]:
 
 def _compute_embedding_openai(text: str) -> Dict[str, float]:
     """Use OpenAI embeddings API."""
+    model_name = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
     try:
         import openai
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
+            _warn_openai_fallback("OPENAI_API_KEY not set", model_name)
             return _compute_embedding_tfidf(text)
 
         if "openai_client" not in _embedding_model_cache:
             _embedding_model_cache["openai_client"] = openai.OpenAI(api_key=api_key)
 
         client = _embedding_model_cache["openai_client"]
-        model_name = os.getenv("OPENAI_EMBEDDING_MODEL", "text-embedding-3-small")
 
         response = client.embeddings.create(
             input=text,
@@ -94,8 +121,13 @@ def _compute_embedding_openai(text: str) -> Dict[str, float]:
         return {str(i): float(val) for i, val in enumerate(embedding)}
 
     except ImportError:
+        _warn_openai_fallback("openai package not installed", model_name)
         return _compute_embedding_tfidf(text)
-    except Exception:
+    except Exception as e:
+        # Log the actual error (once per unique message) so misconfig
+        # like OpenRouter's "No allowed providers" surfaces instead of
+        # silently degrading to TF-IDF. Fix for memory #454.
+        _warn_openai_fallback(f"{type(e).__name__}: {e}", model_name)
         return _compute_embedding_tfidf(text)
 
 

@@ -2,17 +2,60 @@
 from __future__ import annotations
 
 import json
+import logging
 import math
 import os
 import re
 import sqlite3
 from collections import Counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
 
 # Cache for embedding models
 _embedding_model_cache: Dict[str, Any] = {}
+
+_logger = logging.getLogger(__name__)
+
+# Backend-name set for warn-once suppression so a persistent API outage
+# does not flood the log. One warning per (backend, reason) pair per
+# process lifetime is enough to surface the silent-fallback class that
+# Memora issue #457 documented.
+_warned_backends: Set[str] = set()
+
+
+def _strict_mode() -> bool:
+    """True when MEMORA_EMBEDDING_STRICT=1 (or yes/true/on). In strict mode
+    the configured backend is allowed no silent fallback — any failure
+    raises so the user sees it loudly instead of getting TF-IDF embeddings
+    under the rug (memora #457)."""
+    return os.getenv("MEMORA_EMBEDDING_STRICT", "").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def _warn_once(backend_reason: str, detail: str) -> None:
+    """Log a fallback-to-TFIDF warning at most once per process for a given
+    (backend, reason) key. The first failure is the informative one; repeats
+    on every embedding call would be noise."""
+    if backend_reason in _warned_backends:
+        return
+    _warned_backends.add(backend_reason)
+    _logger.warning(
+        "memora.embeddings: %s failed, falling back to TF-IDF: %s. "
+        "Set MEMORA_EMBEDDING_STRICT=1 to fail fast instead. "
+        "Further failures from this backend will be suppressed this process.",
+        backend_reason, detail,
+    )
+
+
+def _strict_raise(backend: str, exc: BaseException) -> None:
+    """Raise when MEMORA_EMBEDDING_STRICT=1 so configuration drift surfaces
+    immediately instead of silently degrading to TF-IDF."""
+    raise RuntimeError(
+        f"MEMORA_EMBEDDING_STRICT=1 and {backend} embedding failed: "
+        f"{type(exc).__name__}: {exc}"
+    ) from exc
 
 
 def _get_embedding_text(
@@ -63,9 +106,21 @@ def _compute_embedding_sentence_transformers(text: str) -> Dict[str, float]:
 
         return {str(i): float(val) for i, val in enumerate(embedding)}
 
-    except ImportError:
+    except ImportError as exc:
+        if _strict_mode():
+            _strict_raise("sentence-transformers", exc)
+        _warn_once(
+            "sentence-transformers:ImportError",
+            "package not installed (pip install sentence-transformers)",
+        )
         return _compute_embedding_tfidf(text)
-    except Exception:
+    except Exception as exc:
+        if _strict_mode():
+            _strict_raise("sentence-transformers", exc)
+        _warn_once(
+            "sentence-transformers:runtime",
+            f"{type(exc).__name__}: {exc}",
+        )
         return _compute_embedding_tfidf(text)
 
 
@@ -76,6 +131,14 @@ def _compute_embedding_openai(text: str) -> Dict[str, float]:
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
+            if _strict_mode():
+                raise RuntimeError(
+                    "MEMORA_EMBEDDING_STRICT=1 and OPENAI_API_KEY is not set"
+                )
+            _warn_once(
+                "openai:no-api-key",
+                "OPENAI_API_KEY is not set",
+            )
             return _compute_embedding_tfidf(text)
 
         if "openai_client" not in _embedding_model_cache:
@@ -93,9 +156,21 @@ def _compute_embedding_openai(text: str) -> Dict[str, float]:
 
         return {str(i): float(val) for i, val in enumerate(embedding)}
 
-    except ImportError:
+    except ImportError as exc:
+        if _strict_mode():
+            _strict_raise("openai", exc)
+        _warn_once(
+            "openai:ImportError",
+            "package not installed (pip install openai)",
+        )
         return _compute_embedding_tfidf(text)
-    except Exception:
+    except Exception as exc:
+        if _strict_mode():
+            _strict_raise("openai", exc)
+        _warn_once(
+            "openai:runtime",
+            f"{type(exc).__name__}: {exc}",
+        )
         return _compute_embedding_tfidf(text)
 
 
@@ -149,6 +224,14 @@ def _compute_embeddings_openai_batch(texts: List[str]) -> List[Dict[str, float]]
 
         api_key = os.getenv("OPENAI_API_KEY")
         if not api_key:
+            if _strict_mode():
+                raise RuntimeError(
+                    "MEMORA_EMBEDDING_STRICT=1 and OPENAI_API_KEY is not set"
+                )
+            _warn_once(
+                "openai-batch:no-api-key",
+                "OPENAI_API_KEY is not set",
+            )
             return [_compute_embedding_tfidf(t) for t in texts]
 
         if "openai_client" not in _embedding_model_cache:
@@ -168,16 +251,36 @@ def _compute_embeddings_openai_batch(texts: List[str]) -> List[Dict[str, float]]
                 sorted_data = sorted(response.data, key=lambda d: d.index)
                 for emb in sorted_data:
                     all_results.append({str(j): float(v) for j, v in enumerate(emb.embedding)})
-            except Exception:
-                # Chunk failed — fall back to per-item sequential (preserves TF-IDF fallback)
+            except Exception as chunk_exc:
+                # Strict mode propagates the chunk error; default preserves
+                # the per-item fallback behavior but emits a warn-once so
+                # the failure is observable (memora #457).
+                if _strict_mode():
+                    _strict_raise("openai-batch:chunk", chunk_exc)
+                _warn_once(
+                    "openai-batch:chunk",
+                    f"{type(chunk_exc).__name__}: {chunk_exc}",
+                )
                 for text in chunk:
                     all_results.append(_compute_embedding_openai(text))
 
         return all_results
 
-    except ImportError:
+    except ImportError as exc:
+        if _strict_mode():
+            _strict_raise("openai-batch", exc)
+        _warn_once(
+            "openai-batch:ImportError",
+            "package not installed (pip install openai)",
+        )
         return [_compute_embedding_tfidf(t) for t in texts]
-    except Exception:
+    except Exception as exc:
+        if _strict_mode():
+            _strict_raise("openai-batch", exc)
+        _warn_once(
+            "openai-batch:runtime",
+            f"{type(exc).__name__}: {exc}",
+        )
         return [_compute_embedding_tfidf(t) for t in texts]
 
 

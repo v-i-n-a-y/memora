@@ -258,19 +258,106 @@ def start_graph_server(host: str, port: int) -> None:
             logger.exception("Graph memory API request failed: %s", e)
             return JSONResponse({"error": "internal_error"}, status_code=500)
 
+    def _to_iso_utc(ts):
+        """Normalize SQLite naive 'YYYY-MM-DD HH:MM:SS' to ISO 8601 with Z."""
+        if not ts:
+            return None
+        if " " in ts and "T" not in ts:
+            return ts.replace(" ", "T") + "Z"
+        return ts
+
     async def api_memories_list(request: Request):
-        """API endpoint: Get memories for timeline with pagination."""
+        """API endpoint: Get memories with optional filters (timeline, issues).
+
+        Query params:
+          type=issue           → only issue memories (metadata.type OR memora/issues tag)
+          status=open|closed   → issue status (normalizes legacy in_progress/resolved/wontfix)
+          severity=critical|major|minor → missing defaults to minor
+          component, category  → exact match
+          sort=updated|created|severity → result ordering
+          limit, offset        → pagination
+        """
         try:
-            limit = max(1, min(int(request.query_params.get("limit", "50")), 200))
-            offset = max(0, int(request.query_params.get("offset", "0")))
+            params = request.query_params
+            favorites_only = params.get("favorites") == "1"
+            type_filter = params.get("type")
+            status_filter = params.get("status")
+            severity_filter = params.get("severity")
+            component_filter = params.get("component")
+            category_filter = params.get("category")
+            sort_param = params.get("sort")
+
+            is_issue_query = type_filter == "issue"
+
+            if favorites_only:
+                default_limit = 500
+                max_limit = 500
+            elif is_issue_query:
+                default_limit = 200
+                max_limit = 500
+            else:
+                default_limit = 50
+                max_limit = 200
+            limit = max(1, min(int(params.get("limit", str(default_limit))), max_limit))
+            offset = max(0, int(params.get("offset", "0")))
+
+            # Build WHERE clauses — each wrapped in parentheses; joined with AND.
+            # Without grouping, SQL precedence (AND > OR) leaks rows.
+            clauses = []
+            binds = []
+
+            if favorites_only:
+                clauses.append("(json_extract(metadata, '$.favorite') IN (1, 'true'))")
+
+            if is_issue_query:
+                clauses.append(
+                    "(json_extract(metadata, '$.type') = 'issue' "
+                    "OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE value = 'memora/issues'))"
+                )
+
+            if status_filter == "open":
+                clauses.append(
+                    "(json_extract(metadata, '$.status') IN ('open', 'in_progress') "
+                    "OR json_extract(metadata, '$.status') IS NULL)"
+                )
+            elif status_filter == "closed":
+                clauses.append(
+                    "(json_extract(metadata, '$.status') IN ('closed', 'resolved', 'wontfix'))"
+                )
+
+            if severity_filter in ("critical", "major", "minor"):
+                clauses.append("(COALESCE(json_extract(metadata, '$.severity'), 'minor') = ?)")
+                binds.append(severity_filter)
+
+            if component_filter:
+                clauses.append("(json_extract(metadata, '$.component') = ?)")
+                binds.append(component_filter)
+
+            if category_filter:
+                clauses.append("(json_extract(metadata, '$.category') = ?)")
+                binds.append(category_filter)
+
+            where_sql = " WHERE " + " AND ".join(clauses) if clauses else ""
+
+            if sort_param == "updated":
+                order_sql = " ORDER BY COALESCE(updated_at, created_at) DESC"
+            elif sort_param == "severity":
+                order_sql = (
+                    " ORDER BY CASE COALESCE(json_extract(metadata, '$.severity'), 'minor') "
+                    "WHEN 'critical' THEN 0 WHEN 'major' THEN 1 WHEN 'minor' THEN 2 ELSE 3 END, "
+                    "COALESCE(updated_at, created_at) DESC"
+                )
+            else:
+                order_sql = " ORDER BY created_at DESC"
 
             conn = connect()
-            total = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
+            total = conn.execute(
+                "SELECT COUNT(*) FROM memories" + where_sql, binds
+            ).fetchone()[0]
             rows = conn.execute(
-                """SELECT id, content, created_at, updated_at, tags, metadata
-                   FROM memories ORDER BY created_at DESC
-                   LIMIT ? OFFSET ?""",
-                (limit, offset),
+                "SELECT id, content, created_at, updated_at, tags, metadata FROM memories"
+                + where_sql + order_sql + " LIMIT ? OFFSET ?",
+                binds + [limit, offset],
             ).fetchall()
             conn.close()
             memories = []
@@ -278,8 +365,8 @@ def start_graph_server(host: str, port: int) -> None:
                 memories.append({
                     "id": row["id"],
                     "content": row["content"],
-                    "created": row["created_at"].split(" ")[0] if row["created_at"] else "",
-                    "updated": row["updated_at"].split(" ")[0] if row["updated_at"] else None,
+                    "created": _to_iso_utc(row["created_at"]) or "",
+                    "updated": _to_iso_utc(row["updated_at"]),
                     "tags": json.loads(row["tags"]) if row["tags"] else [],
                     "metadata": json.loads(row["metadata"]) if row["metadata"] else {},
                 })

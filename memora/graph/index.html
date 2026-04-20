@@ -104,8 +104,8 @@ div.vis-tooltip {
 #panel-tabs .tab { padding: 8px 20px; cursor: pointer; color: #8b949e; border-radius: 6px; font-size: 13px; font-weight: 500; transition: all 0.15s ease; }
 #panel-tabs .tab.active { color: #fff; background: linear-gradient(135deg, #238636 0%, #2ea043 100%); box-shadow: 0 2px 4px rgba(0,0,0,0.2); }
 #panel-tabs .tab:not(.active):hover { color: #c9d1d9; background: #21262d; }
-#tab-detail, #tab-timeline, #tab-duplicates, #tab-history { display: none; }
-#tab-detail.active, #tab-timeline.active, #tab-duplicates.active, #tab-history.active { display: block; }
+#tab-detail, #tab-timeline, #tab-duplicates, #tab-history, #tab-issues { display: none; }
+#tab-detail.active, #tab-timeline.active, #tab-duplicates.active, #tab-history.active, #tab-issues.active { display: block; }
 #tab-duplicates { padding: 0; }
 #duplicates-toolbar { padding: 12px 16px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 12px; flex-shrink: 0; }
 #duplicates-summary { color: #8b949e; font-size: 12px; }
@@ -129,6 +129,36 @@ div.vis-tooltip {
 .dup-action-btn.primary:hover { background: #2ea043; }
 .dup-empty { padding: 30px 20px; text-align: center; color: #8b949e; font-size: 13px; }
 .dup-loading { padding: 30px 20px; text-align: center; color: #8b949e; font-size: 13px; }
+
+/* Issues tab */
+#tab-issues { padding: 0; }
+#issues-toolbar { padding: 12px 16px; border-bottom: 1px solid #30363d; display: flex; align-items: center; gap: 8px; flex-shrink: 0; flex-wrap: wrap; }
+#issues-summary { color: #8b949e; font-size: 12px; margin-left: auto; }
+#issues-list { max-height: calc(100vh - 180px); overflow-y: auto; }
+.issue-row { padding: 10px 14px; border-bottom: 1px solid #30363d; display: grid; grid-template-columns: auto auto 1fr auto; grid-gap: 8px 10px; align-items: center; }
+.issue-row:hover { background: #0d1117; }
+.issue-row-id { color: #58a6ff; font-family: monospace; font-size: 11px; }
+.issue-row-title { color: #c9d1d9; font-weight: 500; font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: pointer; }
+.issue-row-title:hover { color: #58a6ff; }
+.issue-row-actions { display: flex; align-items: center; gap: 4px; }
+.issue-row-preview { color: #8b949e; font-size: 11px; line-height: 1.4; grid-column: 1 / -1; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.issue-row-meta { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; font-size: 11px; color: #8b949e; }
+.issue-severity-icon { width: 12px; height: 12px; border-radius: 50%; display: inline-block; flex-shrink: 0; }
+.issue-severity-icon.critical { background: #f85149; box-shadow: 0 0 6px rgba(248,81,73,0.5); }
+.issue-severity-icon.major { background: #d29922; }
+.issue-severity-icon.minor { background: #8b949e; }
+.issue-select { background: #0d1117; border: 1px solid #30363d; color: #c9d1d9; padding: 2px 6px; border-radius: 4px; font-size: 11px; cursor: pointer; }
+.issue-select:hover { border-color: #58a6ff; }
+.issue-select:focus { outline: none; border-color: #58a6ff; }
+.issue-select.saving { opacity: 0.6; cursor: wait; }
+.issue-select.status-open { color: #ff7b72; }
+.issue-select.status-closed-complete { color: #7ee787; }
+.issue-select.status-closed-not_planned { color: #8b949e; }
+.issue-view-graph-btn { background: transparent; border: none; color: #8b949e; cursor: pointer; padding: 2px 4px; font-size: 14px; }
+.issue-view-graph-btn:hover { color: #58a6ff; }
+.issues-filter-btn { background: none; border: 1px solid #30363d; color: #8b949e; padding: 3px 10px; border-radius: 12px; font-size: 11px; cursor: pointer; }
+.issues-filter-btn:hover { background: #21262d; color: #c9d1d9; }
+.issues-filter-btn.active { background: #30363d; color: #58a6ff; border-color: #58a6ff; }
 #timeline-list { max-height: calc(100vh - 120px); overflow-y: auto; }
 #timeline-list .memory-item { padding: 10px; border-bottom: 1px solid #30363d; cursor: pointer; display: flex; flex-direction: column; }
 #timeline-list .memory-item:hover { background: #21262d; }
@@ -502,6 +532,7 @@ div.vis-tooltip {
             <span class="tab active" onclick="switchTab('detail')">Details</span>
             <span class="tab" onclick="switchTab('timeline')">Timeline</span>
             <span class="tab" onclick="switchTab('duplicates')">Duplicates <span id="duplicates-badge" class="tab-badge" style="display:none;"></span></span>
+            <span class="tab" onclick="switchTab('issues')">Issues <span id="issues-badge" class="tab-badge" style="display:none;"></span></span>
             <span class="tab" onclick="switchTab('history')">History</span>
         </div>
         <div id="tab-detail" class="active">
@@ -539,6 +570,27 @@ div.vis-tooltip {
                 <span id="duplicates-summary"></span>
             </div>
             <div id="duplicates-list"></div>
+        </div>
+        <div id="tab-issues">
+            <div id="issues-toolbar">
+                <button class="issues-filter-btn active" data-status="open" onclick="setIssuesStatusFilter('open', this)">Open</button>
+                <button class="issues-filter-btn" data-status="all" onclick="setIssuesStatusFilter('all', this)">All</button>
+                <button class="issues-filter-btn" data-status="closed" onclick="setIssuesStatusFilter('closed', this)">Closed</button>
+                <select id="issues-severity" class="issue-select" onchange="setIssuesSeverityFilter(this.value)">
+                    <option value="all">All severities</option>
+                    <option value="critical">Critical</option>
+                    <option value="major">Major</option>
+                    <option value="minor">Minor</option>
+                </select>
+                <select id="issues-sort" class="issue-select" onchange="setIssuesSort(this.value)">
+                    <option value="updated">Updated</option>
+                    <option value="created">Created</option>
+                    <option value="severity">Severity</option>
+                </select>
+                <button class="issues-filter-btn" onclick="loadIssues(true)">&#8635; Refresh</button>
+                <span id="issues-summary"></span>
+            </div>
+            <div id="issues-list"></div>
         </div>
         <div id="tab-history">
             <div id="history-list"></div>
@@ -1369,12 +1421,15 @@ div.vis-tooltip {
             document.getElementById('tab-detail').classList.toggle('active', tabName === 'detail');
             document.getElementById('tab-timeline').classList.toggle('active', tabName === 'timeline');
             document.getElementById('tab-duplicates').classList.toggle('active', tabName === 'duplicates');
+            document.getElementById('tab-issues').classList.toggle('active', tabName === 'issues');
             document.getElementById('tab-history').classList.toggle('active', tabName === 'history');
             try { localStorage.setItem('memora-panel-tab', tabName); } catch (e) {}
             if (tabName === 'timeline') {
                 populateTimelineList();
             } else if (tabName === 'duplicates') {
                 loadDuplicates(false);
+            } else if (tabName === 'issues') {
+                loadIssues(false);
             } else if (tabName === 'history') {
                 populateHistoryList();
             } else if (tabName === 'detail' && currentPanelMemoryId) {
@@ -1516,6 +1571,259 @@ div.vis-tooltip {
                         }
                     });
             }
+        }
+
+        // --- Issues tab ---
+        var issuesData = null;
+        var issuesLoading = false;
+        var issuesFilter = { status: 'open', severity: 'all', sort: 'updated' };
+
+        // Strict enum maps — unknown severity/status values fall back to safe
+        // defaults for CSS classes. Raw values are still rendered as labels
+        // (escaped) so operators see bad data.
+        var ISSUE_SEVERITY_CLASSES = { critical: 'critical', major: 'major', minor: 'minor' };
+        var ISSUE_STATUS_CLASSES = {
+            'open': 'status-open',
+            'closed-complete': 'status-closed-complete',
+            'closed-not_planned': 'status-closed-not_planned'
+        };
+
+        function loadIssues(forceReload) {
+            if (issuesLoading) return;
+            if (!forceReload && issuesData) {
+                renderIssuesList(issuesData);
+                return;
+            }
+            issuesLoading = true;
+            var listEl = document.getElementById('issues-list');
+            var sumEl = document.getElementById('issues-summary');
+            listEl.innerHTML = '<div class="dup-loading">Loading issues&hellip;</div>';
+            sumEl.textContent = '';
+            var dbp = getDbParam();
+            var sep = dbp ? dbp + '&' : '?';
+            var params = 'type=issue&limit=200&sort=' + encodeURIComponent(issuesFilter.sort);
+            if (issuesFilter.status !== 'all') params += '&status=' + issuesFilter.status;
+            if (issuesFilter.severity !== 'all') params += '&severity=' + issuesFilter.severity;
+            fetch('/api/memories' + sep + params)
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    issuesLoading = false;
+                    issuesData = data;
+                    renderIssuesList(data);
+                    updateIssuesBadge();
+                })
+                .catch(function() {
+                    issuesLoading = false;
+                    listEl.innerHTML = '<div class="dup-empty" style="color:#f85149;">Failed to load issues.</div>';
+                });
+        }
+
+        function updateIssuesBadge() {
+            // Fetch open count independently so badge reflects global state, not filter
+            var dbp = getDbParam();
+            var sep = dbp ? dbp + '&' : '?';
+            fetch('/api/memories' + sep + 'type=issue&status=open&limit=1')
+                .then(function(r) { return r.json(); })
+                .then(function(data) {
+                    var badge = document.getElementById('issues-badge');
+                    if (!badge) return;
+                    var count = data.total || 0;
+                    if (count > 0) {
+                        badge.textContent = count;
+                        badge.style.display = '';
+                    } else {
+                        badge.style.display = 'none';
+                    }
+                })
+                .catch(function() {});
+        }
+
+        function renderIssuesList(data) {
+            var listEl = document.getElementById('issues-list');
+            var sumEl = document.getElementById('issues-summary');
+            var memories = (data && data.memories) || [];
+            var total = (data && data.total) || 0;
+            if (memories.length === 0) {
+                listEl.innerHTML = '<div class="dup-empty">No issues match the current filter.</div>';
+                sumEl.textContent = '';
+                return;
+            }
+            sumEl.textContent = total + ' issue' + (total === 1 ? '' : 's');
+            var html = '';
+            for (var i = 0; i < memories.length; i++) {
+                html += renderIssueRow(memories[i]);
+            }
+            listEl.innerHTML = html;
+        }
+
+        function renderIssueRow(mem) {
+            var meta = mem.metadata || {};
+            var severityRaw = typeof meta.severity === 'string' ? meta.severity : 'minor';
+            var severityClass = ISSUE_SEVERITY_CLASSES[severityRaw] || 'minor';
+            var component = typeof meta.component === 'string' ? meta.component : '';
+            var category = typeof meta.category === 'string' ? meta.category : '';
+            var commit = typeof meta.commit === 'string' ? meta.commit : '';
+            // Normalize status: 'resolved' -> closed-complete, 'wontfix' -> closed-not_planned,
+            // 'in_progress' -> open. Matches issues.py:44-50.
+            var rawStatus = typeof meta.status === 'string' ? meta.status : 'open';
+            var closedReason = meta.closed_reason === 'not_planned' ? 'not_planned' : 'complete';
+            var selectedStatus;
+            if (rawStatus === 'closed') {
+                selectedStatus = closedReason === 'not_planned' ? 'closed-not_planned' : 'closed-complete';
+            } else if (rawStatus === 'resolved') {
+                selectedStatus = 'closed-complete';
+            } else if (rawStatus === 'wontfix') {
+                selectedStatus = 'closed-not_planned';
+            } else {
+                selectedStatus = 'open';
+            }
+            var statusClass = ISSUE_STATUS_CLASSES[selectedStatus] || 'status-open';
+            var title = (mem.content || '').split('\n')[0].slice(0, 80);
+            var preview = (mem.content || '').slice(0, 200);
+            var updated = formatRelative(mem.updated || mem.created);
+            return ''
+                + '<div class="issue-row" data-memory-id="' + mem.id + '">'
+                + '  <span class="issue-severity-icon ' + severityClass + '" title="' + escapeHtmlAttr(severityRaw) + '"></span>'
+                + '  <span class="issue-row-id">#' + mem.id + '</span>'
+                + '  <span class="issue-row-title" onclick="openIssueDetails(' + mem.id + ')">' + escapeHtmlText(title) + '</span>'
+                + '  <div class="issue-row-actions">'
+                + '    <select class="issue-select ' + statusClass + '" onchange="changeIssueStatus(' + mem.id + ', this.value, this)">'
+                + '      <option value="open"' + (selectedStatus === 'open' ? ' selected' : '') + '>Open</option>'
+                + '      <option value="closed-complete"' + (selectedStatus === 'closed-complete' ? ' selected' : '') + '>Closed: Complete</option>'
+                + '      <option value="closed-not_planned"' + (selectedStatus === 'closed-not_planned' ? ' selected' : '') + '>Closed: Not planned</option>'
+                + '    </select>'
+                + '    <button class="issue-view-graph-btn" onclick="focusIssueInGraph(' + mem.id + ')" title="View in graph">&#8599;</button>'
+                + '  </div>'
+                + '  <div class="issue-row-preview">' + escapeHtmlText(preview) + '</div>'
+                + '  <div class="issue-row-meta">'
+                + (component ? '<span class="issue-badge component">' + escapeHtmlText(component) + '</span>' : '')
+                + '    <input class="issue-select" type="text" placeholder="category" value="' + escapeHtmlAttr(category) + '" onblur="changeIssueCategory(' + mem.id + ', this.value, this)" onkeydown="if(event.key===\'Enter\') this.blur();" />'
+                + (commit ? '<span class="issue-badge commit">#' + escapeHtmlText(commit.slice(0, 7)) + '</span>' : '')
+                + '    <span style="margin-left:auto;">' + escapeHtmlText(updated) + '</span>'
+                + '  </div>'
+                + '</div>';
+        }
+
+        function formatRelative(iso) {
+            if (!iso) return '';
+            try {
+                var d = new Date(iso);
+                if (isNaN(d.getTime())) return formatDate(iso);
+                var diff = (Date.now() - d.getTime()) / 1000;
+                if (diff < 60) return 'just now';
+                if (diff < 3600) return Math.floor(diff / 60) + 'm ago';
+                if (diff < 86400) return Math.floor(diff / 3600) + 'h ago';
+                if (diff < 604800) return Math.floor(diff / 86400) + 'd ago';
+                return formatDate(iso);
+            } catch (e) { return formatDate(iso); }
+        }
+
+        function openIssueDetails(memId) {
+            loadMemoryToPanel(memId);
+            switchTab('detail');
+        }
+
+        function focusIssueInGraph(memId) {
+            if (typeof network !== 'undefined' && network && nodes && nodes.get(memId)) {
+                focusOnNode(memId);
+                network.focus(memId, { scale: 0.7, animation: { duration: 400 } });
+            }
+        }
+
+        function setIssuesStatusFilter(status, btnEl) {
+            issuesFilter.status = status;
+            document.querySelectorAll('#issues-toolbar .issues-filter-btn[data-status]').forEach(function(b) {
+                b.classList.remove('active');
+            });
+            if (btnEl) btnEl.classList.add('active');
+            loadIssues(true);
+        }
+
+        function setIssuesSeverityFilter(severity) {
+            issuesFilter.severity = severity;
+            loadIssues(true);
+        }
+
+        function setIssuesSort(sort) {
+            issuesFilter.sort = sort;
+            loadIssues(true);
+        }
+
+        function changeIssueStatus(memId, selectedKey, selectEl) {
+            // Parse: "open" | "closed-complete" | "closed-not_planned"
+            var newStatus, newClosedReason;
+            if (selectedKey === 'open') {
+                newStatus = 'open';
+                newClosedReason = null;
+            } else if (selectedKey === 'closed-complete') {
+                newStatus = 'closed';
+                newClosedReason = 'complete';
+            } else if (selectedKey === 'closed-not_planned') {
+                newStatus = 'closed';
+                newClosedReason = 'not_planned';
+            } else {
+                return;
+            }
+            selectEl.classList.add('saving');
+            selectEl.disabled = true;
+            var dbp = getDbParam();
+            fetch('/api/memories/' + memId + dbp, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                // Always include type='issue' so tag-only records become canonical
+                // and the graph node picks up issue styling.
+                body: JSON.stringify({ metadata: { type: 'issue', status: newStatus, closed_reason: newClosedReason } })
+            })
+                .then(function(r) {
+                    if (!r.ok) throw new Error('patch-failed');
+                    return r.json();
+                })
+                .then(function(updated) {
+                    selectEl.classList.remove('saving');
+                    selectEl.disabled = false;
+                    if (typeof memoryCache !== 'undefined') delete memoryCache[memId];
+                    // Reload list — closed rows should disappear from Open filter.
+                    loadIssues(true);
+                    if (typeof reloadGraphData === 'function') reloadGraphData();
+                })
+                .catch(function() {
+                    selectEl.classList.remove('saving');
+                    selectEl.disabled = false;
+                    loadIssues(true);
+                    alert('Failed to update status. Check network or daemon logs.');
+                });
+        }
+
+        function changeIssueCategory(memId, newValue, inputEl) {
+            var trimmed = (newValue || '').trim();
+            inputEl.classList.add('saving');
+            inputEl.disabled = true;
+            var dbp = getDbParam();
+            fetch('/api/memories/' + memId + dbp, {
+                method: 'PATCH',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ metadata: { type: 'issue', category: trimmed || null } })
+            })
+                .then(function(r) {
+                    if (!r.ok) throw new Error('patch-failed');
+                    return r.json();
+                })
+                .then(function(updated) {
+                    inputEl.classList.remove('saving');
+                    inputEl.disabled = false;
+                    if (typeof memoryCache !== 'undefined') delete memoryCache[memId];
+                    // Reload list so the cached issuesData reflects the new category
+                    // (avoids showing stale category on next tab switch).
+                    loadIssues(true);
+                    // Refresh graph — canonicalization may change node styling.
+                    if (typeof reloadGraphData === 'function') reloadGraphData();
+                })
+                .catch(function() {
+                    inputEl.classList.remove('saving');
+                    inputEl.disabled = false;
+                    loadIssues(true);
+                    alert('Failed to update category.');
+                });
         }
 
         var timelinePageSize = 50;
@@ -1937,9 +2245,12 @@ div.vis-tooltip {
             if (currentTab !== 'detail') {
                 document.querySelectorAll('#panel-tabs .tab').forEach(function(t) { t.classList.remove('active'); });
                 document.querySelector('#panel-tabs .tab[onclick*="detail"]').classList.add('active');
+                // Deactivate ALL non-detail tabs (previously missed duplicates & issues)
+                ['timeline', 'duplicates', 'issues', 'history'].forEach(function(name) {
+                    var el = document.getElementById('tab-' + name);
+                    if (el) el.classList.remove('active');
+                });
                 document.getElementById('tab-detail').classList.add('active');
-                document.getElementById('tab-timeline').classList.remove('active');
-                document.getElementById('tab-history').classList.remove('active');
                 currentTab = 'detail';
             }
 
@@ -2559,9 +2870,8 @@ div.vis-tooltip {
                     var openPref = localStorage.getItem('memora-panel-open');
                     if (openPref === '0') return; // user closed it last time
                     var tabPref = localStorage.getItem('memora-panel-tab');
-                    var tab = (tabPref === 'duplicates' || tabPref === 'history')
-                        ? tabPref
-                        : 'timeline';
+                    var validTabs = ['timeline', 'duplicates', 'issues', 'history'];
+                    var tab = validTabs.indexOf(tabPref) !== -1 ? tabPref : 'timeline';
                     openPanelOnTab(tab);
                 } catch (e) {
                     try { openPanelOnTab('timeline'); } catch (_) {}
@@ -2591,6 +2901,8 @@ div.vis-tooltip {
             } else {
                 openDefault();
             }
+            // Seed the Issues tab badge count once the graph is ready
+            if (typeof updateIssuesBadge === 'function') updateIssuesBadge();
         }).catch(function() {
             // loadGraph error path — the error message is already rendered in
             // #loading. Open the panel anyway so the user still gets Timeline.
@@ -2615,6 +2927,9 @@ div.vis-tooltip {
             es.addEventListener('graph-updated', function() {
                 showUpdateNotification();
                 reloadGraphData();
+                // Refresh issues tab if active + badge always
+                if (currentTab === 'issues') loadIssues(true);
+                if (typeof updateIssuesBadge === 'function') updateIssuesBadge();
             });
             es.onerror = function() {
                 updateConnectionStatus('disconnected');
@@ -2642,6 +2957,8 @@ div.vis-tooltip {
                         if (data.type === 'graph_updated') {
                             showUpdateNotification();
                             reloadGraphData();
+                            if (currentTab === 'issues') loadIssues(true);
+                            if (typeof updateIssuesBadge === 'function') updateIssuesBadge();
                         } else if (data.type === 'connected') {
                             console.log('Connected, active clients:', data.connections);
                         }

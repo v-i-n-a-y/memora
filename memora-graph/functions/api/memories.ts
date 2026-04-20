@@ -1,6 +1,16 @@
 /**
- * GET /api/memories - Returns all memories for timeline view
- * Supports ?db=memora or ?db=ob1 parameter to select database
+ * GET /api/memories - Returns memories with optional filters (timeline, issues, favorites).
+ * Supports ?db=memora or ?db=ob1 parameter to select database.
+ *
+ * Query params:
+ *   favorites=1              → only favorited memories (legacy)
+ *   type=issue               → only issue memories (matches metadata.type OR 'memora/issues' tag)
+ *   status=open|closed       → issue status filter (normalizes legacy in_progress/resolved/wontfix)
+ *   severity=critical|major|minor → issue severity (missing defaults to minor)
+ *   component=<str>          → exact component match
+ *   category=<str>           → exact category match
+ *   sort=updated|created|severity → result ordering
+ *   limit, offset            → pagination
  */
 
 interface Env {
@@ -51,37 +61,111 @@ function expandR2Urls(metadata: Record<string, unknown> | null): Record<string, 
   return metadata;
 }
 
+// Normalize SQLite "YYYY-MM-DD HH:MM:SS" (naive) to ISO 8601 with Z suffix
+// for cross-browser Date parsing compatibility in formatRelative().
+function toIsoUtc(ts: string | null | undefined): string | null {
+  if (!ts) return null;
+  if (ts.includes(" ") && !ts.includes("T")) {
+    return ts.replace(" ", "T") + "Z";
+  }
+  return ts;
+}
+
 export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
   const url = new URL(request.url);
   const dbName = url.searchParams.get("db");
   const db = getDatabase(env, dbName);
 
-  // Favorites-only mode: server-side filter so the client Favorites view
-  // isn't limited to whatever the paginated timeline has already loaded
-  // (issue #544). Bumps the default limit so a larger favorites set
-  // comes back in a single round trip; still capped to 500.
+  // Collect filters
   const favoritesOnly = url.searchParams.get("favorites") === "1";
-  const defaultLimit = favoritesOnly ? 500 : 50;
-  const maxLimit = favoritesOnly ? 500 : 200;
-  const limit = Math.min(Math.max(parseInt(url.searchParams.get("limit") || String(defaultLimit), 10) || defaultLimit, 1), maxLimit);
+  const typeFilter = url.searchParams.get("type"); // "issue" for now
+  const statusFilter = url.searchParams.get("status"); // "open" | "closed"
+  const severityFilter = url.searchParams.get("severity"); // "critical" | "major" | "minor"
+  const componentFilter = url.searchParams.get("component");
+  const categoryFilter = url.searchParams.get("category");
+  const sortParam = url.searchParams.get("sort"); // "updated" | "created" | "severity"
+
+  const isIssueQuery = typeFilter === "issue";
+
+  // Default limit bumps when filtering issues (users expect larger page)
+  const defaultLimit = favoritesOnly ? 500 : (isIssueQuery ? 200 : 50);
+  const maxLimit = favoritesOnly ? 500 : (isIssueQuery ? 500 : 200);
+  const limit = Math.min(
+    Math.max(parseInt(url.searchParams.get("limit") || String(defaultLimit), 10) || defaultLimit, 1),
+    maxLimit,
+  );
   const offset = Math.max(parseInt(url.searchParams.get("offset") || "0", 10) || 0, 0);
 
-  // json_extract returns the native JSON type (boolean/number), so we
-  // check for 1 and 'true' to handle both encodings. Note: JSON true
-  // is stored as integer 1 in SQLite's json1 extension.
-  const whereClause = favoritesOnly
-    ? "WHERE json_extract(metadata, '$.favorite') IN (1, 'true')"
-    : "";
+  // Build WHERE clauses — each in its own parentheses, joined with AND.
+  // `AND` binds tighter than `OR` in SQL precedence, so un-grouped OR
+  // clauses would leak rows that match only one side.
+  const clauses: string[] = [];
+  const binds: Array<string | number> = [];
 
-  const countSql = "SELECT COUNT(*) as cnt FROM memories" + (whereClause ? " " + whereClause : "");
-  const countRow = await db.prepare(countSql).first<{ cnt: number }>();
+  if (favoritesOnly) {
+    clauses.push("(json_extract(metadata, '$.favorite') IN (1, 'true'))");
+  }
+
+  if (isIssueQuery) {
+    clauses.push(
+      "(json_extract(metadata, '$.type') = 'issue' OR EXISTS (SELECT 1 FROM json_each(memories.tags) WHERE value = 'memora/issues'))",
+    );
+  }
+
+  if (statusFilter === "open") {
+    // Normalize legacy: in_progress → open, unset → open
+    clauses.push("(json_extract(metadata, '$.status') IN ('open', 'in_progress') OR json_extract(metadata, '$.status') IS NULL)");
+  } else if (statusFilter === "closed") {
+    // Normalize legacy: resolved/wontfix → closed
+    clauses.push("(json_extract(metadata, '$.status') IN ('closed', 'resolved', 'wontfix'))");
+  }
+
+  if (severityFilter === "critical" || severityFilter === "major" || severityFilter === "minor") {
+    clauses.push("(COALESCE(json_extract(metadata, '$.severity'), 'minor') = ?)");
+    binds.push(severityFilter);
+  }
+
+  if (componentFilter) {
+    clauses.push("(json_extract(metadata, '$.component') = ?)");
+    binds.push(componentFilter);
+  }
+
+  if (categoryFilter) {
+    clauses.push("(json_extract(metadata, '$.category') = ?)");
+    binds.push(categoryFilter);
+  }
+
+  const whereClause = clauses.length > 0 ? " WHERE " + clauses.join(" AND ") : "";
+
+  // ORDER BY
+  let orderBy: string;
+  switch (sortParam) {
+    case "updated":
+      orderBy = " ORDER BY COALESCE(updated_at, created_at) DESC";
+      break;
+    case "severity":
+      orderBy =
+        " ORDER BY CASE COALESCE(json_extract(metadata, '$.severity'), 'minor') " +
+        "WHEN 'critical' THEN 0 WHEN 'major' THEN 1 WHEN 'minor' THEN 2 ELSE 3 END, " +
+        "COALESCE(updated_at, created_at) DESC";
+      break;
+    case "created":
+    default:
+      orderBy = " ORDER BY created_at DESC";
+      break;
+  }
+
+  const countSql = "SELECT COUNT(*) as cnt FROM memories" + whereClause;
+  const countRow = await db.prepare(countSql).bind(...binds).first<{ cnt: number }>();
   const total = countRow?.cnt ?? 0;
 
-  const listSql = "SELECT id, content, metadata, tags, created_at, updated_at FROM memories" +
-    (whereClause ? " " + whereClause : "") +
-    " ORDER BY created_at DESC LIMIT ? OFFSET ?";
+  const listSql =
+    "SELECT id, content, metadata, tags, created_at, updated_at FROM memories" +
+    whereClause +
+    orderBy +
+    " LIMIT ? OFFSET ?";
 
-  const result = await db.prepare(listSql).bind(limit, offset).all<Memory>();
+  const result = await db.prepare(listSql).bind(...binds, limit, offset).all<Memory>();
 
   const memories = (result.results || []).map(m => {
     const meta = parseJson<Record<string, unknown>>(m.metadata, {});
@@ -89,8 +173,8 @@ export const onRequestGet: PagesFunction<Env> = async ({ env, request }) => {
       id: m.id,
       content: m.content,
       tags: parseJson<string[]>(m.tags, []),
-      created: m.created_at || "",
-      updated: m.updated_at,
+      created: toIsoUtc(m.created_at) ?? "",
+      updated: toIsoUtc(m.updated_at),
       metadata: expandR2Urls(meta),
     };
   });

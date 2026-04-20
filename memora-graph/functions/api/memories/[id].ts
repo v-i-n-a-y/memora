@@ -60,14 +60,24 @@ function expandR2Urls(metadata: Record<string, unknown> | null): Record<string, 
   return metadata;
 }
 
+// Normalize SQLite naive datetime to ISO 8601 with Z suffix for
+// cross-browser Date parsing. Matches memories.ts.
+function toIsoUtc(ts: string | null | undefined): string | null {
+  if (!ts) return null;
+  if (ts.includes(" ") && !ts.includes("T")) {
+    return ts.replace(" ", "T") + "Z";
+  }
+  return ts;
+}
+
 function toMemoryResponse(result: Memory): MemoryResponse {
   const meta = parseJson<Record<string, unknown>>(result.metadata, {});
   return {
     id: result.id,
     content: result.content,
     tags: parseJson<string[]>(result.tags, []),
-    created: result.created_at || "",
-    updated: result.updated_at,
+    created: toIsoUtc(result.created_at) ?? "",
+    updated: toIsoUtc(result.updated_at),
     metadata: expandR2Urls(meta),
   };
 }

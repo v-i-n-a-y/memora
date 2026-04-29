@@ -176,6 +176,52 @@ DEFAULT_GRAPH_PORT = _read_int_env("MEMORA_GRAPH_PORT", 8765)
 mcp = FastMCP("Memory MCP Server", host=DEFAULT_HOST, port=DEFAULT_PORT)
 
 
+def _collapse_nullable_anyof(schema: Any) -> Any:
+    """Recursively collapse Pydantic's `Optional[X]` → `anyOf:[{X},{null}]`
+    pattern into the bare `X` branch. Anthropic's tool input_schema
+    validator rejects `anyOf` / `oneOf` / `allOf`; the `null` branch
+    is redundant once we know the field has a `default` of None.
+
+    Returns the (possibly mutated) schema. Mutates dicts in place
+    where possible so referential structure is preserved.
+    """
+    if isinstance(schema, dict):
+        # Collapse {anyOf:[{...},{type:"null"}]} (or 1-element variants)
+        # before recursing into children.
+        if "anyOf" in schema and isinstance(schema["anyOf"], list):
+            non_null = [b for b in schema["anyOf"]
+                        if not (isinstance(b, dict) and b.get("type") == "null")]
+            if len(non_null) == 1 and isinstance(non_null[0], dict):
+                # Merge the surviving branch's keys into `schema`,
+                # dropping `anyOf` itself. Preserve sibling keys like
+                # `title`, `default`, `description` on `schema`.
+                merged = dict(non_null[0])
+                for k, v in schema.items():
+                    if k == "anyOf":
+                        continue
+                    merged.setdefault(k, v)
+                schema.clear()
+                schema.update(merged)
+        for v in schema.values():
+            _collapse_nullable_anyof(v)
+    elif isinstance(schema, list):
+        for v in schema:
+            _collapse_nullable_anyof(v)
+    return schema
+
+
+def _sanitize_tool_schemas(server: FastMCP) -> None:
+    """Walk every registered tool's `parameters` dict and strip
+    `anyOf` nullable unions. Safe to call multiple times — the
+    transform is idempotent.
+    """
+    tools = getattr(getattr(server, "_tool_manager", None), "_tools", {})
+    for tool in tools.values():
+        params = getattr(tool, "parameters", None)
+        if isinstance(params, dict):
+            _collapse_nullable_anyof(params)
+
+
 def _with_connection(func=None, *, writes=False):
     """Decorator that manages database connections and cloud sync.
 
@@ -2604,6 +2650,15 @@ def main(argv: Optional[list[str]] = None) -> None:
         # Start graph visualization server unless disabled
         if not args.no_graph:
             start_graph_server(args.host, args.graph_port)
+
+        # Anthropic's tool input_schema validator rejects `anyOf` /
+        # `oneOf` / `allOf` combinators — including the property-level
+        # `{anyOf:[{type:X},{type:"null"}]}` Pydantic emits for
+        # `Optional[X]`. Collapse those nullable unions to the
+        # non-null branch in every registered tool's schema before
+        # we start serving, so Claude Code (and any other strict
+        # client) accepts the tools/list response.
+        _sanitize_tool_schemas(mcp)
 
         mcp.run(transport=args.transport)
 

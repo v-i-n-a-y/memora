@@ -3688,8 +3688,15 @@ def update_memory(
     content: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     tags: Optional[List[str]] = None,
+    replace_metadata: bool = False,
 ) -> Optional[Dict[str, Any]]:
-    """Update an existing memory. Only provided fields are updated."""
+    """Update an existing memory. Only provided fields are updated.
+
+    Metadata updates are patch-style by default: provided keys are merged into
+    the existing metadata and keys set to None are deleted. Pass
+    replace_metadata=True only for callers that intentionally want to replace
+    the complete metadata object.
+    """
     # First check if memory exists
     existing = get_memory(conn, memory_id)
     if not existing:
@@ -3697,7 +3704,23 @@ def update_memory(
 
     # Determine what to update
     new_content = _validate_content(content) if content is not None else existing["content"]
-    new_metadata = _prepare_metadata(metadata) if metadata is not None else existing.get("metadata")
+    if metadata is not None:
+        if not isinstance(metadata, Mapping):
+            raise ValueError("Metadata must be a mapping")
+        if replace_metadata:
+            metadata_input = dict(metadata)
+        else:
+            metadata_input = dict(existing.get("metadata") or {})
+            if "section" in metadata or "subsection" in metadata:
+                metadata_input.pop("hierarchy", None)
+            for key, value in metadata.items():
+                if value is None:
+                    metadata_input.pop(key, None)
+                else:
+                    metadata_input[key] = value
+        new_metadata = _prepare_metadata(metadata_input)
+    else:
+        new_metadata = existing.get("metadata")
     new_tags = _validate_tags(tags) if tags is not None else existing.get("tags", [])
 
     if tags is not None:

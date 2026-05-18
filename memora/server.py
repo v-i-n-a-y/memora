@@ -276,8 +276,16 @@ def _update_memory(
     content: Optional[str],
     metadata: Optional[Dict[str, Any]],
     tags: Optional[list[str]],
+    replace_metadata: bool = False,
 ):
-    return update_memory(conn, memory_id, content=content, metadata=metadata, tags=tags)
+    return update_memory(
+        conn,
+        memory_id,
+        content=content,
+        metadata=metadata,
+        tags=tags,
+        replace_metadata=replace_metadata,
+    )
 
 
 @_with_connection(writes=True)
@@ -1842,10 +1850,16 @@ async def memory_update(
     content: Optional[str] = None,
     metadata: Optional[Dict[str, Any]] = None,
     tags: Optional[list[str]] = None,
+    replace_metadata: bool = False,
 ) -> Dict[str, Any]:
-    """Update an existing memory. Only provided fields are updated."""
+    """Update an existing memory.
+
+    Metadata updates merge into existing metadata by default. Set a metadata
+    key to null/None to delete that key. Pass replace_metadata=True only when
+    intentionally replacing the whole metadata object.
+    """
     try:
-        record = _update_memory(memory_id, content, metadata, tags)
+        record = _update_memory(memory_id, content, metadata, tags, replace_metadata)
     except ValueError as exc:
         return {"error": "invalid_input", "message": str(exc)}
     if not record:

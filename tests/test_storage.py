@@ -63,8 +63,10 @@ def test_update_metadata_recomputes_embedding(local_db):
     """Updating metadata should refresh the embedding."""
     with storage.connect() as conn:
         mem = storage.add_memory(
-            conn, content="Metadata reindex test memory content",
-            tags=["meta"], metadata={"section": "docs"}
+            conn,
+            content="Metadata reindex test memory content",
+            tags=["meta"],
+            metadata={"section": "docs"},
         )
         mid = mem["id"]
 
@@ -77,9 +79,77 @@ def test_update_metadata_recomputes_embedding(local_db):
         new_emb = conn.execute(
             "SELECT embedding FROM memories_embeddings WHERE memory_id = ?", (mid,)
         ).fetchone()
+        updated = storage.get_memory(conn, mid)
 
         assert old_emb is not None and new_emb is not None
         assert old_emb[0] != new_emb[0]
+        assert updated is not None
+        assert updated["metadata"]["section"] == "api-reference"
+
+
+def test_update_metadata_merges_existing_keys(local_db):
+    """Partial metadata updates should preserve omitted metadata keys."""
+    with storage.connect() as conn:
+        mem = storage.add_memory(
+            conn,
+            content="Metadata merge safety test memory content",
+            tags=["meta"],
+            metadata={
+                "type": "todo",
+                "status": "open",
+                "priority": "high",
+                "category": "release",
+            },
+        )
+        mid = mem["id"]
+
+        updated = storage.update_memory(conn, mid, metadata={"status": "closed"})
+
+        assert updated is not None
+        assert updated["metadata"]["type"] == "todo"
+        assert updated["metadata"]["status"] == "closed"
+        assert updated["metadata"]["priority"] == "high"
+        assert updated["metadata"]["category"] == "release"
+
+
+def test_update_metadata_null_deletes_key(local_db):
+    """Patch-style metadata updates should delete keys explicitly set to None."""
+    with storage.connect() as conn:
+        mem = storage.add_memory(
+            conn,
+            content="Metadata delete safety test memory content",
+            tags=["meta"],
+            metadata={"status": "closed", "closed_reason": "done"},
+        )
+        mid = mem["id"]
+
+        updated = storage.update_memory(conn, mid, metadata={"closed_reason": None})
+
+        assert updated is not None
+        assert updated["metadata"]["status"] == "closed"
+        assert "closed_reason" not in updated["metadata"]
+
+
+def test_update_metadata_replace_option_allows_full_replacement(local_db):
+    """Explicit replacement remains available for callers that need it."""
+    with storage.connect() as conn:
+        mem = storage.add_memory(
+            conn,
+            content="Metadata replace safety test memory content",
+            tags=["meta"],
+            metadata={"type": "todo", "status": "open", "priority": "high"},
+        )
+        mid = mem["id"]
+
+        updated = storage.update_memory(
+            conn,
+            mid,
+            metadata={"status": "closed"},
+            replace_metadata=True,
+        )
+
+        assert updated is not None
+        assert updated["metadata"] == {"status": "closed"}
 
 
 def test_update_content_validates(local_db):

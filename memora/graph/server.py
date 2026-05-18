@@ -469,6 +469,7 @@ def start_graph_server(host: str, port: int) -> None:
                 memory_id,
                 metadata=merged_metadata if metadata is not None or favorite is not None else None,
                 tags=tags,
+                replace_metadata=True,
             )
             conn.close()
             if result is None:

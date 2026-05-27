@@ -1,0 +1,111 @@
+spec_version: "0.1.0"
+name: memora
+version: "0.2.29"
+description: >
+  Memora is an MCP-compatible persistent memory server for AI agents. It provides
+  structured memory storage, full-text and semantic retrieval, deterministic
+  digests, document fragments, typed graph links, TODO and issue memories, event
+  polling, import/export, and optional graph visualization.
+license: MIT
+model:
+  preferred: ""
+  fallback: []
+  adapters:
+    - mcp
+runtime:
+  max_turns: 50
+  transport: stdio
+  entry: memora-server
+  supports:
+    - stdio
+    - streamable-http
+tools:
+  - mcp
+skills:
+  - name: memory_create
+    description: Create one memory entry with optional metadata, tags, duplicate suggestions, and response sizing.
+  - name: memory_create_issue
+    description: Create an issue memory with status, severity, component, and category metadata.
+  - name: memory_create_todo
+    description: Create a TODO memory with status, priority, and category metadata.
+  - name: memory_create_section
+    description: Create an organizational section or subsection placeholder memory.
+  - name: memory_list
+    description: List memories with query, metadata, date, tag, lineage, and output-shaping filters.
+  - name: memory_list_compact
+    description: Deprecated compact memory listing retained for compatibility.
+  - name: memory_create_batch
+    description: Create multiple memories in one call.
+  - name: memory_delete_batch
+    description: Delete multiple memories by id.
+  - name: memory_absorb
+    description: Absorb facts with duplicate detection, update detection, and consolidation.
+  - name: memory_store_document
+    description: Store markdown as a root document memory plus searchable typed fragments.
+  - name: memory_get_document
+    description: Retrieve a stored document and its ordered fragments by document key.
+  - name: memory_delete_document
+    description: Delete a stored document and its fragments, optionally for one version.
+  - name: memory_get
+    description: Retrieve one memory by id, with optional image stripping and lineage following.
+  - name: memory_update
+    description: Update memory content, tags, or metadata; metadata merges by default.
+  - name: memory_delete
+    description: Delete a memory by id, requiring force for document roots or fragments.
+  - name: memory_tags
+    description: Return the configured tag allowlist.
+  - name: memory_tag_hierarchy
+    description: Return stored tags as a namespace hierarchy.
+  - name: memory_validate_tags
+    description: Validate stored tags against the allowlist.
+  - name: memory_hierarchy
+    description: Return memories organized into a hierarchy derived from metadata.
+  - name: memory_semantic_search
+    description: Search memories by vector similarity.
+  - name: memory_hybrid_search
+    description: Search memories with fused keyword and semantic ranking.
+  - name: memory_digest
+    description: Return a deterministic aggregation of memories, lineage, related ids, TODOs, and issues for a topic.
+  - name: memory_rebuild_embeddings
+    description: Recompute embeddings for all memories.
+  - name: memory_related
+    description: Return cross-referenced memories for one memory, optionally refreshing links first.
+  - name: memory_rebuild_crossrefs
+    description: Recompute cross-reference links for all memories.
+  - name: memory_stats
+    description: Return memory store statistics and analytics.
+  - name: memory_insights
+    description: Analyze activity, stale open items, and consolidation candidates.
+  - name: memory_boost
+    description: Permanently increase a memory's importance score.
+  - name: memory_link
+    description: Create a typed edge between two memories.
+  - name: memory_unlink
+    description: Remove a link between two memories.
+  - name: memory_clusters
+    description: Detect clusters of related memories.
+  - name: memory_find_duplicates
+    description: Find potential duplicate memory pairs with optional LLM comparison.
+  - name: memory_detect_supersessions
+    description: Detect memories that supersede older memories.
+  - name: memory_backfill_tags
+    description: Re-tag existing memories with project-prefixed tags where appropriate.
+  - name: memory_merge
+    description: Merge one memory into another and delete the source.
+  - name: memory_export
+    description: Export all memories as JSON.
+  - name: memory_upload_image
+    description: Upload a local image file to R2 storage for a memory.
+  - name: memory_migrate_images
+    description: Migrate base64 images in memory metadata to R2 references.
+  - name: memory_export_graph
+    description: Export memories as an interactive HTML knowledge graph.
+  - name: memory_import
+    description: Import memories from JSON using replace, merge, or append semantics.
+  - name: memory_events_poll
+    description: Poll for memory events, optionally filtering by timestamp and tags.
+  - name: memory_events_clear
+    description: Mark memory event ids as consumed.
+compliance:
+  risk_level: standard
+  human_in_the_loop: false

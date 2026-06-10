@@ -170,7 +170,8 @@ def promote(c):
     ids = [r["id"] for r in ready]
     c.execute(f"update episodes set promoted=1 where id in ({','.join('?' * len(ids))})", ids)
     c.commit()
-    log(f"promoted {len(ids)} episode(s) to long-term memora")
+    summary = " ".join((out.stdout or "").split())[:500]
+    log(f"promoted {len(ids)} episode(s) to long-term memora | distill: {summary}")
     return len(ids)
 
 

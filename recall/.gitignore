@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+*.sock
+*.lock
+*.log
+recall_log.jsonl
+recall_log.processed.jsonl
+capture_queue*.jsonl
+extract_inbox.jsonl
+dream_inbox.jsonl
+last_nudge

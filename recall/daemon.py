@@ -46,6 +46,64 @@ CWD_FOCUS_MAP = {
     "astrodynamic": "focus:astrodynamic",
 }
 
+# Short-term store (Tier 1). The daemon ingests each captured turn here using
+# its already-warm bge model, so ingest is per-turn with no model reload.
+STDB = os.path.join(_HDIR, "shortterm.db")
+ST_DEDUP_COSINE = 0.85
+ST_RECENT_WINDOW = 400
+ST_DURABLE_CUES = (
+    "always", "never", "from now on", "i prefer", "prefer ", "don't", "do not",
+    "make sure", "going forward", "instead of", "stop ", "no longer", "remember",
+    "in future", "each time", "whenever", "by default",
+)
+
+
+def st_ingest(req):
+    """Ingest one captured turn into the short-term store (local, no LLM)."""
+    import sqlite3
+    from memora import storage
+    from memora.embeddings import cosine_similarity
+    text = ((req.get("user") or "") + "\n" + (req.get("assistant") or "")).strip()
+    if len(text) < 12:
+        return None
+    ev = storage._compute_embedding(text, None, [])
+    if not ev:
+        return None
+    sc = sqlite3.connect(STDB)
+    sc.execute("PRAGMA busy_timeout=3000")
+    sc.execute(
+        "create table if not exists episodes(id integer primary key, first_ts real,"
+        " last_ts real, seen int, session text, cwd text, user text, assistant text,"
+        " emb text, durable int, promoted int default 0)"
+    )
+    now = time.time()
+    dup = None
+    for eid, eemb in sc.execute(
+        "select id, emb from episodes where promoted=0 order by last_ts desc limit ?",
+        (ST_RECENT_WINDOW,),
+    ).fetchall():
+        try:
+            if cosine_similarity(ev, json.loads(eemb)) >= ST_DEDUP_COSINE:
+                dup = eid
+                break
+        except Exception:
+            continue
+    if dup is not None:
+        sc.execute("update episodes set seen=seen+1, last_ts=? where id=?", (now, dup))
+        rid = dup
+    else:
+        cue = 1 if any(q in text.lower() for q in ST_DURABLE_CUES) else 0
+        cur = sc.execute(
+            "insert into episodes(first_ts,last_ts,seen,session,cwd,user,assistant,emb,durable)"
+            " values(?,?,?,?,?,?,?,?,?)",
+            (now, now, 1, req.get("session_id"), req.get("cwd"),
+             req.get("user", ""), req.get("assistant", ""), json.dumps(ev), cue),
+        )
+        rid = cur.lastrowid
+    sc.commit()
+    sc.close()
+    return rid
+
 
 def vec_blend(a, b, wa, wb):
     out = {}
@@ -108,6 +166,10 @@ def main():
                     break
                 buf += chunk
             req = json.loads(buf.decode("utf-8"))
+            if req.get("op") == "ingest":
+                eid = st_ingest(req)
+                client.sendall((json.dumps({"ok": True, "id": eid}) + "\n").encode("utf-8"))
+                continue
             query = req["query"]
             top_k = int(req.get("top_k", 4))
             min_score = float(req.get("min_score", 0.50))

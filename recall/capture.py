@@ -1,47 +1,52 @@
 #!/usr/bin/env python3
-"""Stop hook: capture the completed turn (last user prompt + assistant reply)
-to a queue for later background fact-extraction (mem0-style "add").
+"""Stop hook: capture each completed turn and ingest it into the short-term
+memory store IMMEDIATELY, every turn, by handing it to the already-warm recall
+daemon (which has bge loaded). No model reload is paid per turn.
 
-Also the single EVENT DRIVER for the learning loop (no cron): once enough turns
-accumulate it launches the consolidator in the background, and roughly daily it
-launches the store-maintenance dream. Both are detached, self-locking, and run
-while the session is still alive so the nested `claude -p` survives.
+Also the event driver (no cron):
+- promotion (Tier 2, claude -p) is launched only when short-term actually has a
+  promotable observation AND autowrite is enabled (AUTOWRITE_ON);
+- the maintenance dream runs roughly daily.
 
 Never blocks and never fails the turn.
 """
 import json
 import os
+import socket
+import sqlite3
 import subprocess
 import sys
 import time
 
 _HDIR = os.path.dirname(os.path.abspath(__file__))
-QUEUE = os.path.join(_HDIR, "capture_queue.jsonl")
+SOCK = os.path.join(_HDIR, "daemon.sock")
+DAEMON = os.path.join(_HDIR, "daemon.py")
+QUEUE = os.path.join(_HDIR, "capture_queue.jsonl")  # fallback only (daemon down)
+STDB = os.path.join(_HDIR, "shortterm.db")
+CONSOLIDATE = os.path.join(_HDIR, "consolidate.py")
 CONSOLIDATE_LOCK = os.path.join(_HDIR, "consolidate.lock")
+ENABLE_FLAG = os.path.join(_HDIR, "AUTOWRITE_ON")
 DREAM_STAMP = os.path.join(_HDIR, "dream_runs.log")
-# consolidate.py needs the memora venv python (sentence-transformers + memora);
-# the others are stdlib and run under whatever python invokes this hook.
+DREAM = os.path.join(_HDIR, "dream.sh")
 VENV_PYTHON = "/Users/vinay/.local/share/uv/tools/memora-mcp/bin/python"
 
 MAX_CHARS = 6000
-CONSOLIDATE_THRESHOLD = 6   # turns queued before a background extraction runs
-DREAM_EVERY_HOURS = 20      # daily-ish store maintenance, event-triggered
+PERSIST_HOURS = 12
+DREAM_EVERY_HOURS = 20
 
 
 def _text_from_content(content):
     if isinstance(content, str):
         return content
     if isinstance(content, list):
-        parts = []
-        for b in content:
-            if isinstance(b, dict) and b.get("type") == "text" and b.get("text"):
-                parts.append(b["text"])
-        return "\n".join(parts)
+        return "\n".join(
+            b["text"] for b in content
+            if isinstance(b, dict) and b.get("type") == "text" and b.get("text")
+        )
     return ""
 
 
 def _last_user_prompt(transcript_path):
-    """Scan the transcript JSONL for the most recent genuine user message."""
     last = ""
     try:
         with open(transcript_path) as f:
@@ -56,7 +61,6 @@ def _last_user_prompt(transcript_path):
                 msg = o.get("message") or {}
                 if o.get("type") == "user" or msg.get("role") == "user":
                     t = _text_from_content(msg.get("content")).strip()
-                    # skip tool-result-only turns and command/system noise
                     if t and not t.startswith("<") and not t.startswith("/"):
                         last = t
     except Exception:
@@ -64,37 +68,63 @@ def _last_user_prompt(transcript_path):
     return last
 
 
-def _count_lines(path):
+def _ingest_via_daemon(rec):
     try:
-        with open(path) as f:
-            return sum(1 for _ in f)
+        s = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        s.settimeout(4)
+        s.connect(SOCK)
+        s.sendall((json.dumps({"op": "ingest", **rec}) + "\n").encode("utf-8"))
+        s.recv(8192)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def _spawn_daemon():
+    try:
+        subprocess.Popen([VENV_PYTHON, DAEMON], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     except Exception:
-        return 0
+        pass
+
+
+def _queue_fallback(rec):
+    try:
+        with open(QUEUE, "a") as f:
+            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
+    except Exception:
+        pass
+
+
+def _has_promotable():
+    """Readiness check via plain SQLite (no embeddings): any unpromoted episode
+    that has recurred (>=2) or is a durable cue dwelt past PERSIST_HOURS."""
+    try:
+        c = sqlite3.connect(STDB)
+        row = c.execute(
+            "select 1 from episodes where promoted=0 and "
+            "(seen>=2 or (durable=1 and ?-first_ts>=?)) limit 1",
+            (time.time(), PERSIST_HOURS * 3600),
+        ).fetchone()
+        c.close()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _launch(cmd):
+    subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, start_new_session=True,
+                     env={**os.environ, "CLAUDE_DREAM_RUN": "1"})
 
 
 def _stale(path, hours):
     try:
         return (time.time() - os.path.getmtime(path)) > hours * 3600
     except Exception:
-        return True  # never run -> treat as stale
-
-
-def _launch(cmd):
-    subprocess.Popen(
-        cmd,
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        start_new_session=True,
-        env={**os.environ, "CLAUDE_DREAM_RUN": "1"},
-    )
-
-
-def _maybe_launch():
-    if _count_lines(QUEUE) >= CONSOLIDATE_THRESHOLD and not os.path.exists(CONSOLIDATE_LOCK):
-        _launch([VENV_PYTHON, os.path.join(_HDIR, "consolidate.py")])
-    if _stale(DREAM_STAMP, DREAM_EVERY_HOURS):
-        _launch(["/bin/bash", os.path.join(_HDIR, "dream.sh")])
+        return True
 
 
 def main():
@@ -106,7 +136,6 @@ def main():
         return
     transcript = data.get("transcript_path") or ""
     user = _last_user_prompt(transcript) if transcript else ""
-    assistant = data.get("last_assistant_message") or ""
     u = user.strip()
     if len(u) < 12:
         return
@@ -115,14 +144,21 @@ def main():
         "session_id": data.get("session_id"),
         "cwd": data.get("cwd"),
         "user": u[:MAX_CHARS],
-        "assistant": (assistant or "")[:MAX_CHARS],
+        "assistant": (data.get("last_assistant_message") or "")[:MAX_CHARS],
     }
-    try:
-        with open(QUEUE, "a") as f:
-            f.write(json.dumps(rec, ensure_ascii=False) + "\n")
-    except Exception:
-        return
-    _maybe_launch()
+    # Tier 1: ingest THIS turn now, via the warm daemon.
+    if not _ingest_via_daemon(rec):
+        _queue_fallback(rec)   # daemon down: keep it for a later drain
+        _spawn_daemon()        # and bring the daemon up for next turn
+
+    # Tier 2: promote only when something is actually ready and autowrite is on.
+    if (os.path.exists(ENABLE_FLAG) and _has_promotable()
+            and not os.path.exists(CONSOLIDATE_LOCK)):
+        _launch([VENV_PYTHON, CONSOLIDATE])
+
+    # Store maintenance, roughly daily, event-triggered (no cron).
+    if _stale(DREAM_STAMP, DREAM_EVERY_HOURS):
+        _launch(["/bin/bash", DREAM])
 
 
 if __name__ == "__main__":

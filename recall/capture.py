@@ -19,6 +19,9 @@ _HDIR = os.path.dirname(os.path.abspath(__file__))
 QUEUE = os.path.join(_HDIR, "capture_queue.jsonl")
 CONSOLIDATE_LOCK = os.path.join(_HDIR, "consolidate.lock")
 DREAM_STAMP = os.path.join(_HDIR, "dream_runs.log")
+# consolidate.py needs the memora venv python (sentence-transformers + memora);
+# the others are stdlib and run under whatever python invokes this hook.
+VENV_PYTHON = "/Users/vinay/.local/share/uv/tools/memora-mcp/bin/python"
 
 MAX_CHARS = 6000
 CONSOLIDATE_THRESHOLD = 6   # turns queued before a background extraction runs
@@ -89,7 +92,7 @@ def _launch(cmd):
 
 def _maybe_launch():
     if _count_lines(QUEUE) >= CONSOLIDATE_THRESHOLD and not os.path.exists(CONSOLIDATE_LOCK):
-        _launch(["/usr/bin/python3", os.path.join(_HDIR, "consolidate.py")])
+        _launch([VENV_PYTHON, os.path.join(_HDIR, "consolidate.py")])
     if _stale(DREAM_STAMP, DREAM_EVERY_HOURS):
         _launch(["/bin/bash", os.path.join(_HDIR, "dream.sh")])
 

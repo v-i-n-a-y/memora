@@ -9,3 +9,8 @@ capture_queue*.jsonl
 extract_inbox.jsonl
 dream_inbox.jsonl
 last_nudge
+
+*.db
+shortterm.db
+promote_batch.json
+AUTOWRITE_ON

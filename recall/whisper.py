@@ -9,12 +9,34 @@ dependency-free. Never blocks or fails.
 """
 import json
 import os
+import socket
 import sqlite3
+import subprocess
 import sys
 
 DB = os.path.expanduser("~/.local/share/memora/memories.db")
 MAX_ITEMS = 10
 LIMIT = 240
+VENV_PYTHON = "/Users/vinay/.local/share/uv/tools/memora-mcp/bin/python"
+ST_GRAPH_PORT = 8766
+
+
+def _ensure_shortterm_graph():
+    """Make sure the short-term graph viewer (:8766) is running; start it if
+    not. Long-term graph (:8765) is served by memora-server itself."""
+    try:
+        socket.create_connection(("127.0.0.1", ST_GRAPH_PORT), 0.3).close()
+        return  # already up
+    except OSError:
+        pass
+    try:
+        subprocess.Popen(
+            [VENV_PYTHON, os.path.join(os.path.dirname(os.path.abspath(__file__)), "shortterm_graph.py")],
+            stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, start_new_session=True,
+        )
+    except Exception:
+        pass
 
 
 def first_sentence(text):
@@ -27,6 +49,7 @@ def first_sentence(text):
 
 
 def main():
+    _ensure_shortterm_graph()
     if not os.path.exists(DB):
         return
     try:

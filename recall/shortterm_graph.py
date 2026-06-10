@@ -39,7 +39,7 @@ def build_graph():
     c.row_factory = sqlite3.Row
     try:
         rows = c.execute(
-            "select id,user,seen,durable,promoted,first_ts,emb from episodes"
+            "select id,user,seen,durable,promoted,status,first_ts,emb from episodes"
         ).fetchall()
     except Exception:
         return {"nodes": [], "links": []}
@@ -51,7 +51,7 @@ def build_graph():
         nodes.append({
             "id": r["id"], "label": (r["user"] or "")[:70], "seen": r["seen"],
             "durable": int(r["durable"]), "promoted": int(r["promoted"]),
-            "ready": int(ready), "age_h": age_h,
+            "status": (r["status"] or "pending"), "ready": int(ready), "age_h": age_h,
         })
         try:
             embs.append(json.loads(r["emb"]))
@@ -73,17 +73,26 @@ HTML = """<!DOCTYPE html><html><head><meta charset=utf-8><title>Memora - short-t
 #empty{position:fixed;top:50%;left:0;right:0;text-align:center;color:#6e7681}</style>
 <script src="https://unpkg.com/force-graph"></script></head>
 <body><div id=hdr><b>Short-term memory</b> (working tier)<br>
-<span class=k><span class=dot style="background:#2ea043"></span>promoted to long-term</span>
+<span class=k><span class=dot style="background:#2ea043"></span>stored in long-term</span>
+<span class=k><span class=dot style="background:#388bfd"></span>duplicate (already known)</span>
+<span class=k><span class=dot style="background:#484f58"></span>discarded (ephemeral)</span>
 <span class=k><span class=dot style="background:#d29922"></span>ready to promote</span>
 <span class=k><span class=dot style="background:#e3b341"></span>durable cue</span>
 <span class=k><span class=dot style="background:#6e7681"></span>transient</span>
 &nbsp; node size = recurrence &middot; edges = semantic similarity</div>
 <div id=empty></div><div id=g></div><script>
-function colour(n){return n.promoted?'#2ea043':n.ready?'#d29922':n.durable?'#e3b341':'#6e7681'}
+function colour(n){
+ if(n.status=='stored')return '#2ea043';
+ if(n.status=='duplicate')return '#388bfd';
+ if(n.status=='ephemeral'||n.status=='processed')return '#484f58';
+ if(n.ready)return '#d29922';
+ if(n.durable)return '#e3b341';
+ return '#6e7681';
+}
 fetch('/api/graph').then(r=>r.json()).then(d=>{
  if(!d.nodes.length){document.getElementById('empty').textContent='Short-term store is empty - it fills as turns are captured and ingested.';return}
  ForceGraph()(document.getElementById('g')).graphData(d)
-  .nodeLabel(n=>`${n.label}<br>seen ${n.seen} &middot; age ${n.age_h}h${n.promoted?' &middot; promoted':n.ready?' &middot; ready':''}`)
+  .nodeLabel(n=>`${n.label}<br>seen ${n.seen} &middot; age ${n.age_h}h &middot; ${n.status}`)
   .nodeColor(colour).nodeVal(n=>2+n.seen*3)
   .linkColor(()=>'rgba(120,140,170,.25)').linkWidth(l=>l.value*2)
   .backgroundColor('#0e1116');

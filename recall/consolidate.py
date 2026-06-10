@@ -65,7 +65,8 @@ def _db():
         """create table if not exists episodes(
             id integer primary key, first_ts real, last_ts real, seen int,
             session text, cwd text, user text, assistant text, emb text,
-            durable int, promoted int default 0)"""
+            durable int, promoted int default 0,
+            status text default 'pending', memory_name text)"""
     )
     return c
 
@@ -168,11 +169,32 @@ def promote(c):
         log(f"promote claude -p exit {out.returncode}; episodes retained. tail={ (out.stderr or '')[-160:] !r}")
         return 0
     ids = [r["id"] for r in ready]
-    c.execute(f"update episodes set promoted=1 where id in ({','.join('?' * len(ids))})", ids)
+    raw = out.stdout or ""
+    # Parse the agent's per-episode RESULTS line: which episodes actually became
+    # long-term memories (stored), were duplicates, or were discarded (ephemeral).
+    outcomes = {}
+    mark = raw.rfind("RESULTS:")
+    if mark != -1:
+        seg = raw[mark + len("RESULTS:"):]
+        s, e = seg.find("["), seg.rfind("]")
+        if s != -1 and e > s:
+            try:
+                for o in json.loads(seg[s:e + 1]):
+                    if isinstance(o, dict) and "id" in o:
+                        outcomes[int(o["id"])] = (o.get("outcome") or "processed", o.get("memory_name"))
+            except Exception:
+                outcomes = {}
+    stored = 0
+    for eid in ids:
+        outcome, name = outcomes.get(eid, ("processed", None))
+        if outcome == "stored":
+            stored += 1
+        c.execute("update episodes set promoted=1, status=?, memory_name=? where id=?",
+                  (outcome, name, eid))
     c.commit()
-    summary = " ".join((out.stdout or "").split())[:500]
-    log(f"promoted {len(ids)} episode(s) to long-term memora | distill: {summary}")
-    return len(ids)
+    log(f"promotion run: {len(ids)} processed, {stored} stored to long-term | "
+        + " ".join(raw.split())[:400])
+    return stored
 
 
 def expire(c):

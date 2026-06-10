@@ -11,6 +11,8 @@ STEP 4. For each distilled fact:
   b. If a clear match exists, do NOT duplicate — skip it (leave the existing memory as is).
   c. Otherwise `memory_create` it: distilled and self-contained, first sentence a summary; for feedback/project memories include a **Why:** line and a **How to apply:** line. UK English, no em dashes. Tag and type per STEP 1.
 
-STEP 5. Output a short plain-text summary: how many memories you created, how many you skipped as duplicates, and their names. Nothing else.
+STEP 5. Output, as the FINAL line, exactly `RESULTS: ` followed by a JSON array with one object per input episode id from {{PAYLOAD}}:
+  {"id": <episode id>, "outcome": "stored" | "duplicate" | "ephemeral", "memory_name": "<slug or null>"}
+where "stored" = the episode contributed to a memory you created (give its name), "duplicate" = its point already exists in long-term, "ephemeral" = not durable, nothing stored. You may print a one-sentence summary before that line, but the RESULTS line must come last.
 
-If nothing in the batch is genuinely durable, create nothing and say so.
+If nothing in the batch is genuinely durable, create nothing and mark every id "ephemeral".

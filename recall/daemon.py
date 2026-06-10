@@ -74,7 +74,8 @@ def st_ingest(req):
     sc.execute(
         "create table if not exists episodes(id integer primary key, first_ts real,"
         " last_ts real, seen int, session text, cwd text, user text, assistant text,"
-        " emb text, durable int, promoted int default 0)"
+        " emb text, durable int, promoted int default 0,"
+        " status text default 'pending', memory_name text)"
     )
     now = time.time()
     dup = None

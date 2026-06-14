@@ -3125,6 +3125,34 @@ def main(argv: Optional[list[str]] = None) -> None:
         # client) accepts the tools/list response.
         _sanitize_tool_schemas(mcp)
 
+        # Configure DNS-rebinding protection for HTTP transports. The MCP SDK
+        # rejects non-localhost Host headers by default, which breaks
+        # reverse-proxy deployments (returns 421 "Invalid Host header"). Allow
+        # specific hosts via MEMORA_ALLOWED_HOSTS (comma-separated), or disable
+        # the check when behind a trusted, authenticated proxy.
+        if args.transport in ("streamable-http", "sse"):
+            from mcp.server.transport_security import TransportSecuritySettings
+
+            _allowed = os.getenv("MEMORA_ALLOWED_HOSTS", "").strip()
+            if _allowed and _allowed != "*":
+                _hosts: list[str] = []
+                _origins: list[str] = []
+                for _h in (x.strip() for x in _allowed.split(",")):
+                    if not _h:
+                        continue
+                    _hosts += [_h, _h + ":*"]
+                    _b = _h.split(":")[0]
+                    _origins += [f"https://{_b}", f"http://{_b}"]
+                mcp.settings.transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=True,
+                    allowed_hosts=_hosts,
+                    allowed_origins=_origins,
+                )
+            else:
+                mcp.settings.transport_security = TransportSecuritySettings(
+                    enable_dns_rebinding_protection=False
+                )
+
         # Optional bearer-token auth for HTTP transports. When MEMORA_API_TOKEN
         # is set, every HTTP request to the MCP app must carry
         # `Authorization: Bearer <token>`; otherwise the transport stays open

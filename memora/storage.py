@@ -78,6 +78,10 @@ EMBEDDING_MODEL = os.getenv("MEMORA_EMBEDDING_MODEL", "openai")  # openai, sente
 LLM_ENABLED = os.getenv("MEMORA_LLM_ENABLED", "true").lower() in ("true", "1", "yes")
 LLM_MODEL = os.getenv("MEMORA_LLM_MODEL", "gpt-4o-mini")
 REWRITE_MODEL = os.getenv("MEMORA_REWRITE_MODEL", "") or LLM_MODEL
+# Extra output tokens reserved for reasoning models (e.g. qwen3) whose hidden
+# thinking is emitted separately and would otherwise consume the whole answer
+# budget, leaving message.content empty. 0 = unchanged (e.g. gpt-4o-mini).
+LLM_THINK_HEADROOM = int(os.getenv("MEMORA_LLM_THINK_HEADROOM", "0"))
 
 # Event notification configuration
 EVENT_TRIGGER_TAG = "shared-cache"
@@ -1102,7 +1106,7 @@ Respond with JSON only (no markdown):
                 {"role": "user", "content": prompt}
             ],
             temperature=0.1,
-            max_tokens=300,
+            max_tokens=300 + LLM_THINK_HEADROOM,
         )
 
         result_text = response.choices[0].message.content.strip()
@@ -1198,7 +1202,7 @@ Respond with JSON only (no markdown):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=200,
+            max_tokens=200 + LLM_THINK_HEADROOM,
         )
 
         result_text = response.choices[0].message.content.strip()
@@ -1282,7 +1286,7 @@ def rewrite_query(
                 {"role": "user", "content": user_prompt},
             ],
             temperature=0.3,
-            max_tokens=300,
+            max_tokens=300 + LLM_THINK_HEADROOM,
         )
 
         result_text = response.choices[0].message.content.strip()
@@ -3082,7 +3086,7 @@ Respond with JSON only (no markdown):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=600,
+            max_tokens=600 + LLM_THINK_HEADROOM,
         )
         result_text = response.choices[0].message.content.strip()
         # Strip markdown code fences if present
@@ -3166,7 +3170,7 @@ Respond with the merged text only (no quotes, no preamble)."""
                 {"role": "user", "content": prompt},
             ],
             temperature=0.1,
-            max_tokens=500,
+            max_tokens=500 + LLM_THINK_HEADROOM,
         )
         result = response.choices[0].message.content.strip()
         if result and len(result) >= 10:
@@ -4684,7 +4688,7 @@ Respond with JSON only (no markdown):
                 {"role": "user", "content": prompt},
             ],
             temperature=0.2,
-            max_tokens=500,
+            max_tokens=500 + LLM_THINK_HEADROOM,
         )
 
         result_text = response.choices[0].message.content.strip()

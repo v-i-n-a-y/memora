@@ -3125,7 +3125,57 @@ def main(argv: Optional[list[str]] = None) -> None:
         # client) accepts the tools/list response.
         _sanitize_tool_schemas(mcp)
 
-        mcp.run(transport=args.transport)
+        # Optional bearer-token auth for HTTP transports. When MEMORA_API_TOKEN
+        # is set, every HTTP request to the MCP app must carry
+        # `Authorization: Bearer <token>`; otherwise the transport stays open
+        # (preserving default local/stdio behaviour). The graph server started
+        # above on --graph-port is intentionally left for localhost/tunnel use.
+        _api_token = os.getenv("MEMORA_API_TOKEN")
+        if args.transport in ("streamable-http", "sse") and _api_token:
+            import hmac
+            import sys
+            import uvicorn
+
+            _inner_app = (
+                mcp.streamable_http_app()
+                if args.transport == "streamable-http"
+                else mcp.sse_app()
+            )
+            _expected = f"Bearer {_api_token}"
+
+            async def _auth_app(scope, receive, send):
+                if scope.get("type") == "http":
+                    _headers = dict(scope.get("headers") or [])
+                    _provided = _headers.get(b"authorization", b"").decode("latin-1")
+                    if not hmac.compare_digest(_provided, _expected):
+                        await send({
+                            "type": "http.response.start",
+                            "status": 401,
+                            "headers": [(b"content-type", b"application/json")],
+                        })
+                        await send({
+                            "type": "http.response.body",
+                            "body": b'{"error":"unauthorized"}',
+                        })
+                        return
+                await _inner_app(scope, receive, send)
+
+            print(
+                f"Token auth enabled for {args.transport} on "
+                f"{args.host}:{args.port}",
+                file=sys.stderr,
+            )
+            uvicorn.run(_auth_app, host=args.host, port=args.port, log_level="info")
+        else:
+            if args.transport in ("streamable-http", "sse"):
+                import sys
+
+                print(
+                    "WARNING: MEMORA_API_TOKEN not set — HTTP transport is "
+                    "UNAUTHENTICATED",
+                    file=sys.stderr,
+                )
+            mcp.run(transport=args.transport)
 
 
 def _handle_sync_pull() -> None:

@@ -198,25 +198,33 @@ class ClaudeAdaptor:
         return _result_from_json(parsed, episodes)
 
 
-PROMPT_TEMPLATE = """You distil persistent short-term observations into atomic long-term \
-memory "leaves" for a personal knowledge store. Output JSON ONLY — do not call any tools.
+PROMPT_TEMPLATE = """You distil persistent observations into atomic long-term memory "leaves" \
+for a personal knowledge store. Output JSON ONLY — no prose, no tool calls.
 
 INPUT — a JSON list of observations that have already persisted (recurred or dwelt):
 {{PAYLOAD}}
 
-Produce atomic leaves following this house style EXACTLY:
-- One leaf = ONE self-contained topic. First sentence is a standalone summary. <= 1000 chars.
-- name: kebab-case slug "<scope>-<topic>" where scope is a project/focus prefix
-  (perseus, eva, phd, astro) or omitted if cross-cutting. Add a -YYYY-MM-DD suffix
-  ONLY for point-in-time states/events, never for durable facts.
-- type: one of user | feedback | project | reference (this is metadata, NOT a tag).
+Rules for each leaf:
+- One atomic topic; first sentence is a standalone summary; <= 1000 chars.
+- name: kebab-case "<scope>-<topic>"; scope is a project/focus prefix (perseus, eva, phd,
+  astro) ONLY if the fact is specifically about that area; OMIT scope for cross-cutting
+  facts (writing style, general tooling/preferences). Add a -YYYY-MM-DD suffix only for
+  point-in-time events.
+- type: one of user | feedback | project | reference (metadata, NOT a tag).
 - section: one of evandor | phd | astrodynamic | pa | contacts | working-style.
-- tags: only focus:evandor / focus:phd / focus:astrodynamic and project:<name>.
-  NEVER use generic tags (reference, note, plan, task, status, project, ...).
-- links: slugs to link to — at least the relevant hub (perseus-hub, phd-working-tree,
-  evandor-working-tree, astrodynamic-overview) and any sibling leaves.
-- For feedback/project leaves, include a "Why:" line and a "How to apply:" line.
-- Merge several related observations into ONE leaf. Ignore ephemeral/one-off chatter.
+  Cross-cutting preferences -> working-style.
+- tags: add focus:evandor / focus:phd / focus:astrodynamic ONLY when the fact is
+  specifically about that area's work; cross-cutting facts get NO focus tag; never add more
+  than one focus tag unless it genuinely spans them; add project:<name> only for a specific
+  sub-project (e.g. project:perseus, project:ect-cmu). When unsure, use [].
+  There is NO focus:perseus — Perseus is project:perseus under focus:phd.
+- links: choose ONLY from these real hubs: perseus-hub, ectcmu-hub, evandor-working-tree,
+  phd-working-tree, astrodynamic-overview, contacts-convention, memora-usage-conventions.
+  Include the single most relevant one; if none clearly fits, use [].
+- feedback/project leaves: include a "Why:" line and a "How to apply:" line.
+- Promote EVERY genuinely durable fact (a stable preference, a project fact/decision, an
+  external reference). Mark "ephemeral" ONLY for transient task chatter. Merge closely
+  related observations into ONE leaf.
 
 Return a single JSON object (optionally inside a ```json fence):
 {
@@ -228,8 +236,8 @@ Return a single JSON object (optionally inside a ```json fence):
     {"id": <episode id>, "outcome": "stored|duplicate|ephemeral", "memory_name": "<slug or null>"}
   ]
 }
-Every input id must appear exactly once in "outcomes". If nothing is durable, return
-empty "leaves" and mark every id "ephemeral"."""
+Every input id must appear exactly once in "outcomes". If nothing is durable, return empty
+"leaves" and mark every id "ephemeral"."""
 
 
 def _extract_json(text: str) -> Optional[dict]:

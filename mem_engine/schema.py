@@ -16,6 +16,7 @@ from typing import Dict, List, Optional, Tuple
 
 VALID_TYPES = {"user", "feedback", "project", "reference"}
 VALID_SECTIONS = {"evandor", "phd", "astrodynamic", "pa", "contacts", "working-style"}
+KNOWN_FOCUS = {"evandor", "phd", "astrodynamic"}  # the only valid focus:<area> values
 
 # scope prefix -> the section it usually implies (sanity-check name vs section)
 SCOPE_SECTION = {
@@ -89,7 +90,9 @@ class Leaf:
                 "hierarchy": {"path": [self.section]},
                 "source": "mem_engine",
             },
-            "tags": [t for t in self.tags if t not in GENERIC_TAGS],
+            "tags": [t for t in self.tags
+                     if t not in GENERIC_TAGS
+                     and not (t.startswith("focus:") and t.split(":", 1)[1] not in KNOWN_FOCUS)],
         }
 
 
@@ -128,6 +131,10 @@ def validate(leaf: Leaf) -> List[Problem]:
             ("error", f"generic tags {bad} are namespaced by memora — drop them "
                       "(type belongs in metadata.type)")
         )
+    for t in leaf.tags:
+        if t.startswith("focus:") and t.split(":", 1)[1] not in KNOWN_FOCUS:
+            problems.append(("warn", f"unknown focus tag '{t}' — will be dropped on write "
+                                     f"(known: {sorted(KNOWN_FOCUS)})"))
 
     n = len(leaf.content or "")
     if n > HARD_MAX_CHARS:

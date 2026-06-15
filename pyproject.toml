@@ -43,7 +43,7 @@ ignore = ["E501"]
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["memora*"]
+include = ["memora*", "mem_engine*"]
 
 [tool.setuptools.package-data]
 "memora.graph" = ["index.html"]

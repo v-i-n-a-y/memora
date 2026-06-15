@@ -277,3 +277,47 @@ def _result_from_json(obj: dict, episodes: List[Episode]) -> DistillResult:
         if eid in valid_ids:
             res.outcomes[eid] = (o.get("outcome") or "ephemeral", o.get("memory_name"))
     return res
+
+
+class OpenAIAdaptor:
+    """Real distiller via an OpenAI-compatible chat endpoint.
+
+    Uses the openai SDK (already a memora dependency) so it runs INSIDE the
+    deployed server against whatever LLM the server already has — e.g. ollama
+    qwen3 via OPENAI_BASE_URL — with no extra CLI or credentials. Returns
+    structured JSON only; the engine validates the schema and persists, so the
+    model never writes to the store directly. Degrades to all-ephemeral (nothing
+    promoted) if the endpoint or parse fails, so episodes are retried later.
+    """
+
+    name = "openai"
+
+    def __init__(self, model=None, base_url=None, api_key=None, timeout=240):
+        self.model = (model or os.environ.get("MEM_ENGINE_LLM_MODEL")
+                      or os.environ.get("MEMORA_LLM_MODEL") or "gpt-4o-mini")
+        self.base_url = base_url or os.environ.get("OPENAI_BASE_URL")
+        self.api_key = api_key or os.environ.get("OPENAI_API_KEY") or "not-needed"
+        self.timeout = timeout
+
+    def distill(self, episodes: List[Episode]) -> DistillResult:
+        res = DistillResult(outcomes={e.id: ("ephemeral", None) for e in episodes})
+        if not episodes:
+            return res
+        payload = [{"id": e.id, "text": e.text, "seen": e.seen,
+                    "age_hours": e.age_hours, "durable": bool(e.durable)} for e in episodes]
+        prompt = PROMPT_TEMPLATE.replace("{{PAYLOAD}}", json.dumps(payload, ensure_ascii=False))
+        try:
+            from openai import OpenAI
+            client = OpenAI(base_url=self.base_url, api_key=self.api_key, timeout=self.timeout)
+            resp = client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.2,
+            )
+            text = resp.choices[0].message.content or ""
+        except Exception:
+            return res  # endpoint unreachable -> retain episodes for retry
+        parsed = _extract_json(text)
+        if not parsed:
+            return res
+        return _result_from_json(parsed, episodes)

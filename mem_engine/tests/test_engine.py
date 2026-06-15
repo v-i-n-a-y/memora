@@ -241,5 +241,20 @@ class TestMcpToolsRoundtrip(unittest.TestCase):
         self.assertTrue(mcp_tools.tool_status()["promotion_enabled"])
 
 
+class TestAdaptorAndStoreSelection(unittest.TestCase):
+    def test_env_selects_adaptor(self):
+        os.environ["MEM_ENGINE_ADAPTOR"] = "mock"
+        self.assertEqual(mcp_tools._build_adaptor().name, "mock")
+        os.environ["MEM_ENGINE_ADAPTOR"] = "openai"
+        self.assertEqual(mcp_tools._build_adaptor().name, "openai")
+        os.environ.pop("MEM_ENGINE_ADAPTOR", None)
+
+    def test_openai_adaptor_degrades_gracefully(self):
+        from mem_engine.adaptor import OpenAIAdaptor
+        res = OpenAIAdaptor(base_url="http://127.0.0.1:9", api_key="x", timeout=2).distill(
+            [Episode(1, "always prefer tabs over spaces in this repo", 2, 1, 0, 0, 0.0)])
+        self.assertEqual(res.outcomes[1][0], "ephemeral")  # unreachable endpoint -> nothing promoted
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

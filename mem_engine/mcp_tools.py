@@ -27,6 +27,28 @@ from .stores import SqliteLongTermStore
 _ENGINE: Optional[Engine] = None
 
 
+def _build_adaptor():
+    """MEM_ENGINE_ADAPTOR: mock (default, no LLM) | openai (server's LLM) | claude (CLI)."""
+    kind = os.environ.get("MEM_ENGINE_ADAPTOR", "mock").lower()
+    if kind == "openai":
+        from .adaptor import OpenAIAdaptor
+        return OpenAIAdaptor()
+    if kind == "claude":
+        from .adaptor import ClaudeAdaptor
+        return ClaudeAdaptor()
+    from .adaptor import MockAdaptor
+    return MockAdaptor()
+
+
+def _build_longterm(emb, home):
+    """MEM_ENGINE_LONGTERM: sqlite (default, scratch) | memora (the real graph)."""
+    kind = os.environ.get("MEM_ENGINE_LONGTERM", "sqlite").lower()
+    if kind == "memora":
+        from .stores import MemoraLongTermStore
+        return MemoraLongTermStore(db_path=os.environ.get("MEMORA_DB_PATH"))
+    return SqliteLongTermStore(os.path.join(home, "longterm.db"), embedder=emb)
+
+
 def get_engine() -> Engine:
     global _ENGINE
     if _ENGINE is None:
@@ -35,12 +57,12 @@ def get_engine() -> Engine:
         os.makedirs(home, exist_ok=True)
         emb = get_embedder(os.environ.get("MEM_ENGINE_EMBEDDER", "auto"))
         wm = WorkingMemory(os.path.join(home, "shortterm.db"), embedder=emb)
-        lt = SqliteLongTermStore(os.path.join(home, "longterm.db"), embedder=emb)
+        lt = _build_longterm(emb, home)
         cfg = EngineConfig(
             min_score=default_min_score(emb.name),
             enabled=os.environ.get("MEM_ENGINE_AUTOWRITE", "0").lower() in ("1", "true", "yes"),
         )
-        _ENGINE = Engine(wm, lt, config=cfg)
+        _ENGINE = Engine(wm, lt, adaptor=_build_adaptor(), config=cfg)
     return _ENGINE
 
 

@@ -204,12 +204,20 @@ for a personal knowledge store. Output JSON ONLY — no prose, no tool calls.
 INPUT — a JSON list of observations that have already persisted (recurred or dwelt):
 {{PAYLOAD}}
 
-Rules for each leaf:
+DECISION — default to PROMOTE. An observation is DURABLE (promote it) if it is any of: a
+user preference, a project or system fact/decision, an architecture or config detail, a
+fact about a person, or an external reference — even if it seems minor or routine. Mark
+"ephemeral" ONLY for clearly transient chatter with no lasting value (greetings, one-off
+commands, "what time is it", "run that again").
+Examples — PROMOTE: "Perseus is JAX-only since 2026-05-18" (project fact); "always use UK
+English, no em dashes" (preference); "the engine was deployed on the server on 2026-06-15"
+(system change). EPHEMERAL: "what is the weather", "thanks", "rerun the tests".
+
+For each PROMOTED observation, emit a leaf:
 - One atomic topic; first sentence is a standalone summary; <= 1000 chars.
 - name: kebab-case "<scope>-<topic>"; scope is a project/focus prefix (perseus, eva, phd,
   astro) ONLY if the fact is specifically about that area; OMIT scope for cross-cutting
-  facts (writing style, general tooling/preferences). Add a -YYYY-MM-DD suffix only for
-  point-in-time events.
+  facts. Add a -YYYY-MM-DD suffix only for point-in-time events.
 - type: one of user | feedback | project | reference (metadata, NOT a tag).
 - section: one of evandor | phd | astrodynamic | pa | contacts | working-style.
   Cross-cutting preferences -> working-style.
@@ -220,11 +228,10 @@ Rules for each leaf:
   There is NO focus:perseus — Perseus is project:perseus under focus:phd.
 - links: choose ONLY from these real hubs: perseus-hub, ectcmu-hub, evandor-working-tree,
   phd-working-tree, astrodynamic-overview, contacts-convention, memora-usage-conventions.
-  Include the single most relevant one; if none clearly fits, use [].
+  Pick the single most relevant one; a writing/style preference links to
+  memora-usage-conventions; if none clearly fits, use [].
 - feedback/project leaves: include a "Why:" line and a "How to apply:" line.
-- Promote EVERY genuinely durable fact (a stable preference, a project fact/decision, an
-  external reference). Mark "ephemeral" ONLY for transient task chatter. Merge closely
-  related observations into ONE leaf.
+- Merge closely related observations into ONE leaf.
 
 Return a single JSON object (optionally inside a ```json fence):
 {
@@ -236,8 +243,7 @@ Return a single JSON object (optionally inside a ```json fence):
     {"id": <episode id>, "outcome": "stored|duplicate|ephemeral", "memory_name": "<slug or null>"}
   ]
 }
-Every input id must appear exactly once in "outcomes". If nothing is durable, return empty
-"leaves" and mark every id "ephemeral"."""
+Every input id must appear exactly once in "outcomes"."""
 
 
 def _extract_json(text: str) -> Optional[dict]:

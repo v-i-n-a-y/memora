@@ -20,6 +20,12 @@ import os
 import sys
 import time
 
+try:
+    from filelock import FileLock, Timeout  # a memora dependency; present in the image
+except Exception:  # degrade gracefully if filelock is unavailable
+    FileLock = None
+    Timeout = Exception
+
 from .mcp_tools import get_engine
 
 
@@ -30,6 +36,17 @@ def _log(msg: str) -> None:
 
 def main() -> None:
     interval = float(os.environ.get("MEM_ENGINE_CONSOLIDATE_INTERVAL", "60"))
+    # Singleton: hold a file lock for the process lifetime so a second worker
+    # (e.g. relaunched by the keep-alive cron) exits immediately instead of
+    # racing on the stores. Acquired before the engine/embedder load, so an
+    # extra instance costs almost nothing.
+    lock_path = os.environ.get("MEM_ENGINE_LOCK", "/data/memora/mem_engine_worker.lock")
+    if FileLock is not None:
+        _singleton = FileLock(lock_path)  # noqa: F841 (held for process lifetime)
+        try:
+            _singleton.acquire(timeout=0)
+        except Timeout:
+            return  # another worker already holds the lock; exit quietly
     eng = get_engine()
     _log(f"[mem_engine.worker] started; interval={interval}s enabled={eng.config.enabled} "
          f"adaptor={getattr(eng.adaptor, 'name', '?')} longterm={eng.longterm.count()}")

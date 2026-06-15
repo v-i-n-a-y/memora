@@ -79,7 +79,14 @@ class WorkingMemory:
         self.promote_batch = promote_batch
         self.min_len = min_len
         self.durable_cues = tuple(durable_cues)
-        self._conn = sqlite3.connect(db_path)
+        # timeout + WAL so the server process and the consolidation worker can
+        # share this DB concurrently without lock errors (no-op for :memory:).
+        self._conn = sqlite3.connect(db_path, timeout=30.0)
+        try:
+            self._conn.execute("PRAGMA journal_mode=WAL")
+            self._conn.execute("PRAGMA busy_timeout=30000")
+        except sqlite3.Error:
+            pass
         self._conn.execute(_SCHEMA)
         self._conn.commit()
 

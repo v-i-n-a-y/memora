@@ -3007,6 +3007,63 @@ async def memory_events_clear(event_ids: List[int]) -> Dict[str, Any]:
     return {"cleared": cleared}
 
 
+# --- mem_engine v2: working-memory + atomic-leaf promotion (opt-in) ----------
+# Server-side memory engine (see mem_engine/README.md). Lazy import so the server
+# still starts if mem_engine isn't on the path. Promotion is gated behind
+# MEM_ENGINE_AUTOWRITE; the default ingest adaptor is the no-LLM MockAdaptor.
+def _mem_engine_tools():
+    from mem_engine import mcp_tools  # lazy; top-level package at repo root
+    return mcp_tools
+
+
+@mcp.tool()
+async def memory_observe(text: str, session: Optional[str] = None,
+                         cwd: Optional[str] = None, kind: str = "turn") -> Dict[str, Any]:
+    """Record an observation (a turn or a fact) into working memory (Tier 1).
+
+    Cheap and local: embeds, dedups against recent episodes, counts recurrence,
+    flags durable cues. Nothing is written long-term here. Call at end of turn.
+    """
+    try:
+        return _mem_engine_tools().tool_observe(text, session=session, cwd=cwd, kind=kind)
+    except Exception as exc:  # pragma: no cover
+        return {"error": "mem_engine_unavailable", "message": str(exc)}
+
+
+@mcp.tool()
+async def memory_recall(prompt: str) -> Dict[str, Any]:
+    """Thin pointers (id + slug + score + 1-line) to memories relevant to a prompt.
+
+    Fetch a full leaf with memory_get only if needed. Call at start of turn.
+    """
+    try:
+        return _mem_engine_tools().tool_recall(prompt)
+    except Exception as exc:  # pragma: no cover
+        return {"error": "mem_engine_unavailable", "message": str(exc)}
+
+
+@mcp.tool()
+async def memory_consolidate() -> Dict[str, Any]:
+    """Promote persistent working-memory episodes into atomic long-term leaves.
+
+    Gated: writes nothing unless MEM_ENGINE_AUTOWRITE is set. Run on a timer or
+    at session end. Uses the configured ingest adaptor (mock by default).
+    """
+    try:
+        return _mem_engine_tools().tool_consolidate()
+    except Exception as exc:  # pragma: no cover
+        return {"error": "mem_engine_unavailable", "message": str(exc)}
+
+
+@mcp.tool()
+async def memory_engine_status() -> Dict[str, Any]:
+    """Report mem_engine working/long-term stats, embedder, adaptor, and gate state."""
+    try:
+        return _mem_engine_tools().tool_status()
+    except Exception as exc:  # pragma: no cover
+        return {"error": "mem_engine_unavailable", "message": str(exc)}
+
+
 # Graph functions moved to memora/graph/ module
 
 

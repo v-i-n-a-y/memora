@@ -9,8 +9,8 @@
   "plugins": [
     {
       "name": "memora",
-      "description": "Persistent semantic memory for Claude Code — auto-injects relevant context at session start, captures git commits, test results, and research via hooks, and provides 30+ MCP tools for memory management.",
-      "version": "0.2.20",
+      "description": "Persistent semantic memory for Claude Code — auto-injects relevant context at session start, recalls relevant memories per prompt, captures git commits, test results, and research via hooks, and provides 30+ MCP tools for memory management.",
+      "version": "0.2.21",
       "author": {
         "name": "agentic-mcp-tools",
         "url": "https://github.com/agentic-mcp-tools"

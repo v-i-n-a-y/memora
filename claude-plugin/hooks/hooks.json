@@ -10,6 +10,17 @@
       ]
     }
   ],
+  "UserPromptSubmit": [
+    {
+      "hooks": [
+        {
+          "type": "command",
+          "command": "python3 ${CLAUDE_PLUGIN_ROOT}/hooks-handlers/user_prompt_submit.py",
+          "timeout": 5000
+        }
+      ]
+    }
+  ],
   "PostToolUse": [
     {
       "hooks": [

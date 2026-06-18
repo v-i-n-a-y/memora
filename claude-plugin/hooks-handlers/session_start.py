@@ -124,11 +124,23 @@ def main():
         load_memora_env()
         input_data = json.load(sys.stdin)
         cwd = input_data.get("cwd", os.getcwd())
+        session_id = input_data.get("session_id")
         context = extract_project_context(cwd)
         memories = search_memora(context["search_query"], top_k=5)
 
         if memories:
             additional_context = format_memories(memories)
+            # Seed per-session dedup so the UserPromptSubmit recall hook doesn't
+            # re-inject memories already shown here at session start.
+            try:
+                import recall_state
+                recall_state.prune()
+                recall_state.add_seen(
+                    session_id,
+                    [(m.get("memory", m) or {}).get("id") for m in memories],
+                )
+            except Exception:
+                pass
             output = {
                 "hookSpecificOutput": {
                     "hookEventName": "SessionStart",

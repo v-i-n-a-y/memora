@@ -5,6 +5,7 @@ Persistent semantic memory for Claude Code sessions. Automatically injects relev
 ## Features
 
 - **Context injection**: SessionStart hook searches memora for relevant memories and injects them into the session
+- **Per-prompt recall**: UserPromptSubmit hook injects the memories most relevant to each prompt, with session-level dedup (a memory is injected at most once per session), a relevance gate, and a small cap so it stays cheap and non-redundant. Tunable via `MEMORA_RECALL_MIN_SCORE`, `MEMORA_RECALL_TOP_K`, `MEMORA_RECALL_MIN_PROMPT_CHARS`
 - **Auto-capture**: PostToolUse hook captures git commits, test results, web research, and documentation edits
 - **MCP tools**: 30+ tools for creating, searching, organizing, and maintaining memories
 - **Knowledge graph**: Interactive visualization at `http://localhost:8765`
